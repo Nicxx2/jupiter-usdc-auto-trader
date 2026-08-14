@@ -1,0 +1,29 @@
+name: Validate release artifact
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      N8N_DB_PASSWORD: ci-only-placeholder
+      N8N_ENCRYPTION_KEY: ci-only-placeholder
+      N8N_RUNNERS_AUTH_TOKEN: ci-only-placeholder
+      GATEWAY_PASSPHRASE: ci-only-placeholder
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify embedded workflow and safety invariants
+        run: node scripts/verify-release.mjs
+      - name: Validate Docker Compose
+        run: node scripts/verify-compose-matrix.mjs

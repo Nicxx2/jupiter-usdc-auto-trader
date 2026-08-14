@@ -1,0 +1,2632 @@
+name: jupiter-usdc-auto-trader
+
+services:
+  postgres:
+    image: postgres:16@sha256:11a9d238fbb48bab14599c57e41123254452b1a2d93c6c8595bce96f346bd082
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: ${N8N_DB_PASSWORD:?N8N_DB_PASSWORD is required and must remain stable}
+      POSTGRES_DB: n8n
+    volumes:
+    - type: volume
+      source: postgres_data
+      target: /var/lib/postgresql/data
+      volume:
+        nocopy: true
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U n8n -d n8n
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+    - n8n_db
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.31.6@sha256:3c07c723326dd72e46a6969181c66a75260b7a204b9b77ba1ece6d594489c684
+    restart: unless-stopped
+    extra_hosts:
+    - host.docker.internal:host-gateway
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?N8N_DB_PASSWORD is required and must remain stable}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?N8N_ENCRYPTION_KEY is required and must remain stable}
+      N8N_RUNNERS_MODE: external
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:?N8N_RUNNERS_AUTH_TOKEN is required and must remain stable}
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      N8N_SECURE_COOKIE: 'false'
+      N8N_DIAGNOSTICS_ENABLED: 'false'
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: 'true'
+      GENERIC_TIMEZONE: ${TZ:-Europe/London}
+      TZ: ${TZ:-Europe/London}
+      INTERNAL_N8N_OWNER_PASSWORD_HASH: $$2a$$12$$ES9vjAtv3SGlbU5HKkBf7eB8FTAC/KTVUgVirYv.bdp2BGBLrv0Ui
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: 'true'
+    volumes:
+    - type: volume
+      source: n8n_data
+      target: /home/node/.n8n
+      volume:
+        nocopy: true
+    - type: volume
+      source: bootstrap_data
+      target: /bootstrap
+      volume:
+        nocopy: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      n8n-permissions:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+    - n8n_db
+    - n8n_runners
+    - trading_control
+    entrypoint:
+    - tini
+    - --
+    - /bin/sh
+    - -c
+    command:
+    - |
+      set -eu
+
+      # Only a genuinely fresh n8n data directory gets the hidden bootstrap owner.
+      # Existing installations keep their existing owner account untouched.
+      if [ ! -f /home/node/.n8n/config ]; then
+        echo "[n8n-supervisor] fresh data directory: provisioning internal bootstrap owner"
+        export N8N_INSTANCE_OWNER_MANAGED_BY_ENV=true
+        export N8N_INSTANCE_OWNER_EMAIL="jupiter-auto-trader@localhost.invalid"
+        export N8N_INSTANCE_OWNER_FIRST_NAME="Jupiter"
+        export N8N_INSTANCE_OWNER_LAST_NAME="Auto Trader"
+        export N8N_INSTANCE_OWNER_PASSWORD_HASH="$$INTERNAL_N8N_OWNER_PASSWORD_HASH"
+      else
+        echo "[n8n-supervisor] existing n8n data detected: preserving existing owner settings"
+      fi
+
+      child=""
+      pending_ack=""
+
+      stop_child() {
+        if [ -z "$$child" ]; then
+          return 0
+        fi
+
+        if kill -0 "$$child" 2>/dev/null; then
+          echo "[n8n-supervisor] stopping n8n PID $$child"
+          kill -TERM "$$child" 2>/dev/null || true
+
+          i=0
+          while kill -0 "$$child" 2>/dev/null && [ "$$i" -lt 20 ]; do
+            sleep 1
+            i=$$((i + 1))
+          done
+
+          if kill -0 "$$child" 2>/dev/null; then
+            echo "[n8n-supervisor] n8n did not stop after 20s; forcing stop"
+            kill -KILL "$$child" 2>/dev/null || true
+          fi
+
+          wait "$$child" 2>/dev/null || true
+        fi
+
+        child=""
+      }
+
+      trap 'stop_child; exit 0' TERM INT
+
+      while true; do
+        n8n &
+        child=$$!
+        echo "[n8n-supervisor] n8n started as PID $$child"
+
+        if [ -n "$$pending_ack" ]; then
+          printf '%s' "$$pending_ack" > /bootstrap/restart.ack
+          pending_ack=""
+        fi
+
+        restart_requested=0
+
+        while kill -0 "$$child" 2>/dev/null; do
+          if [ -f /bootstrap/restart.request ]; then
+            pending_ack="$$(cat /bootstrap/restart.request 2>/dev/null || true)"
+            rm -f /bootstrap/restart.request
+            restart_requested=1
+            echo "[n8n-supervisor] workflow/bootstrap restart requested"
+            stop_child
+            break
+          fi
+          sleep 1
+        done
+
+        if [ -n "$$child" ]; then
+          wait "$$child" 2>/dev/null || true
+          child=""
+        fi
+
+        if [ "$$restart_requested" -eq 1 ]; then
+          echo "[n8n-supervisor] restarting n8n so published workflow becomes active"
+        else
+          echo "[n8n-supervisor] n8n exited; restarting"
+        fi
+
+        sleep 2
+      done
+  n8n-runner:
+    image: n8nio/runners:2.31.6@sha256:fd1c233abcbcc45a5a376132b2d48457e9eaab3c48d642eb276a314d2e4e67ed
+    restart: unless-stopped
+    environment:
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:?N8N_RUNNERS_AUTH_TOKEN is required and must remain stable}
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+    depends_on:
+      n8n-bootstrap:
+        condition: service_completed_successfully
+      n8n:
+        condition: service_healthy
+    networks:
+    - n8n_runners
+  trading-controller:
+    image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+    restart: unless-stopped
+    init: true
+    entrypoint:
+    - node
+    - -e
+    command:
+    - |
+      const http = require('http');
+      const fs = require('fs');
+      const crypto = require('crypto');
+      const { URL, URLSearchParams } = require('url');
+
+      const ADMIN_PORT = Number(process.env.ADMIN_PORT || 5680);
+      const INTERNAL_PORT = Number(process.env.INTERNAL_PORT || 8080);
+      const APP_API_PORT = String(process.env.APP_API_PORT || '8000').trim();
+      const APP_API_URL_OVERRIDE = String(process.env.APP_API_URL || '').trim();
+      const APP_API = resolveAppApiUrl(APP_API_URL_OVERRIDE, APP_API_PORT);
+      const DASHBOARD_COOKIE_SECURE = parseEnvBoolean('DASHBOARD_COOKIE_SECURE', process.env.DASHBOARD_COOKIE_SECURE || 'false');
+      const N8N_WEBHOOK = process.env.N8N_ALERT_WEBHOOK || 'http://n8n:5678/webhook/jupiter-ntfy-event';
+      const N8N_HEALTH = process.env.N8N_HEALTH_URL || 'http://n8n:5678/healthz';
+      const GATEWAY = (process.env.GATEWAY_URL || 'http://gateway:15888').replace(/\/+$$/, '');
+      const RPC_CONFIGURATOR = (process.env.RPC_CONFIGURATOR_URL || 'http://rpc-configurator:8081').replace(/\/+$$/, '');
+      const RPC_CONTROL_DIR = process.env.RPC_CONTROL_DIR || '/gateway-control';
+      const RPC_TOKEN_FILE = `$${RPC_CONTROL_DIR}/rpc-config-token`;
+      const NTFY = (process.env.NTFY_SERVER || 'https://ntfy.sh').replace(/\/+$$/, '');
+      const NETWORK = process.env.SOLANA_NETWORK || 'mainnet-beta';
+      const TOPIC_REFRESH_MS = Number(process.env.TOPIC_REFRESH_SECONDS || 15) * 1000;
+      const LOOKBACK = process.env.NTFY_LOOKBACK || '5m';
+      const DATA_DIR = '/data';
+      const STATE_FILE = `$${DATA_DIR}/state.json`;
+      const AUTH_FILE = `$${DATA_DIR}/auth.json`;
+      const SEEN_FILE = `$${DATA_DIR}/seen.json`;
+      const TRADES_FILE = `$${DATA_DIR}/trades.json`;
+      const AUDIT_FILE = `$${DATA_DIR}/audit.json`;
+      const TRIGGER_GUARDS_FILE = `$${DATA_DIR}/trigger-guards.json`;
+      const MAX_SEEN = 3000;
+      const MAX_TRADES = 500;
+      const MAX_AUDIT = 1000;
+      const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const nowIso = () => new Date().toISOString();
+
+      function parseEnvBoolean(name, value) {
+        const normalized=String(value??'').trim().toLowerCase();
+        if(['1','true','yes','on'].includes(normalized))return true;
+        if(['0','false','no','off',''].includes(normalized))return false;
+        throw new Error(`$${name} must be true or false`);
+      }
+
+      function resolveAppApiUrl(fullUrl, portRaw) {
+        const override=String(fullUrl||'').trim();
+        if(!override){
+          const raw=String(portRaw||'').trim();
+          if(!/^\d{1,5}$$/.test(raw))throw new Error('APP_API_PORT must be a whole number from 1 to 65535');
+          const port=Number(raw);
+          if(!Number.isInteger(port)||port<1||port>65535)throw new Error('APP_API_PORT must be from 1 to 65535');
+          return `http://host.docker.internal:$${port}/api/tokens`;
+        }
+
+        let u;
+        try{u=new URL(override);}catch{throw new Error('APP_API_URL must be a complete http:// or https:// URL ending in /api/tokens');}
+        if(!['http:','https:'].includes(u.protocol))throw new Error('APP_API_URL must use http:// or https://');
+        if(u.username||u.password)throw new Error('APP_API_URL must not contain embedded credentials');
+        if(u.hash)throw new Error('APP_API_URL must not contain a URL fragment');
+        if(u.search)throw new Error('APP_API_URL must not contain query parameters or API keys');
+        const host=String(u.hostname||'').toLowerCase();
+        const mappedIpv4Loopback=/^\[::ffff:7f[0-9a-f]{2}:/.test(host)||host==='[::ffff:0:0]';
+        if(['localhost','0.0.0.0','::','[::]','::1','[::1]'].includes(host)||host.endsWith('.localhost')||host.startsWith('127.')||mappedIpv4Loopback)
+          throw new Error('APP_API_URL localhost/loopback would point at this container; use APP_API_PORT for the same Docker host');
+        if(u.port==='0')throw new Error('APP_API_URL port must be from 1 to 65535');
+        const path=u.pathname.replace(/\/+$$/,'');
+        if(!path.endsWith('/api/tokens'))throw new Error('APP_API_URL must end in /api/tokens');
+        u.pathname=path;
+        return u.toString();
+      }
+
+      function atomicJson(path, value) {
+        const tmp = `$${path}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
+        fs.renameSync(tmp, path);
+      }
+      function readJson(path, fallback) {
+        try { return JSON.parse(fs.readFileSync(path, 'utf8')); } catch { return fallback; }
+      }
+      function boundedPush(arr, value, max) {
+        arr.push(value);
+        if (arr.length > max) arr.splice(0, arr.length - max);
+      }
+      function html(v) {
+        return String(v ?? '')
+          .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;').replaceAll("'", '&#039;');
+      }
+
+      function formatBalance(value, decimals=8) {
+        const n=Number(value);
+        if(!Number.isFinite(n)) return '—';
+        if(n===0) return '0';
+        const abs=Math.abs(n);
+        if(abs<0.000001) return n.toPrecision(6).replace(/\.?0+e/,'e');
+        return n.toLocaleString('en-GB',{maximumFractionDigits:decimals,useGrouping:true});
+      }
+      function formatPrice(value) {
+        const n=Number(value);
+        if(!Number.isFinite(n)) return '—';
+        if(n===0) return '0';
+        if(Math.abs(n)<0.0001) return n.toFixed(10).replace(/0+$$/,'').replace(/\.$$/,'');
+        return n.toLocaleString('en-GB',{maximumFractionDigits:8,useGrouping:false});
+      }
+      function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
+      function b64urlDecode(v) { return Buffer.from(v, 'base64url'); }
+      function base58Encode(buf) {
+        const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+        const bytes = Buffer.from(buf);
+        let zeros = 0;
+        while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+        let n = 0n;
+        for (const b of bytes) n = (n << 8n) + BigInt(b);
+        let s = '';
+        while (n > 0n) {
+          const r = Number(n % 58n);
+          n /= 58n;
+          s = alphabet[r] + s;
+        }
+        return '1'.repeat(zeros) + (s || (zeros ? '' : '1'));
+      }
+      function isMint(v) { return /^[1-9A-HJ-NP-Za-km-z]{32,44}$$/.test(String(v || '')); }
+      function approx(a, b, rel = 1e-9, abs = 1e-12) {
+        a = Number(a); b = Number(b);
+        return Number.isFinite(a) && Number.isFinite(b) &&
+          Math.abs(a - b) <= Math.max(abs, Math.abs(b) * rel);
+      }
+
+      function priceImpactPercent(raw) {
+        const n=Number(raw);
+        return Number.isFinite(n) && n >= 0 ? Math.abs(n)*100 : null;
+      }
+      function impactWithinLimit(raw, maxPct=state.maxPriceImpactPct) {
+        const pct=priceImpactPercent(raw);
+        return pct !== null && Number.isFinite(Number(maxPct)) && pct <= Number(maxPct);
+      }
+      function isDefaultPublicSolanaRpc(url) {
+        const s=String(url||'').trim().toLowerCase().replace(/\/+$$/,'');
+        return !s || s === 'https://api.mainnet-beta.solana.com' || s === 'http://api.mainnet-beta.solana.com';
+      }
+
+      function redactRpcUrl(raw){
+        try{
+          const u=new URL(String(raw||''));
+          if(u.username)u.username='***';
+          if(u.password)u.password='***';
+          if([...u.searchParams.keys()].length){
+            for(const k of [...u.searchParams.keys()])u.searchParams.set(k,'***');
+          }
+          return u.toString();
+        }catch{return raw?'configured':'—';}
+      }
+      function classifyRpcUrl(raw){
+        try{
+          const u=new URL(String(raw||''));
+          const host=u.hostname.toLowerCase();
+          if(host==='api.mainnet-beta.solana.com')return 'public';
+          if(host.endsWith('helius-rpc.com'))return 'helius';
+          return raw?'custom':'unknown';
+        }catch{return 'unknown';}
+      }
+      function rpcAccessToken(){
+        try{return fs.readFileSync(RPC_TOKEN_FILE,'utf8').trim();}catch{return '';}
+      }
+      async function rpcManager(path,opts={},timeout=15000){
+        const token=rpcAccessToken();
+        if(!token)throw new Error('RPC configurator authentication token is unavailable');
+        return fetchJson(`$${RPC_CONFIGURATOR}$${path}`,{
+          ...opts,
+          headers:{...(opts.headers||{}),'authorization':`Bearer $${token}`}
+        },timeout);
+      }
+      async function getRpcManagerStatus(){
+        return rpcManager('/status',{},8000);
+      }
+      async function applyRpcProvider(provider,heliusApiKey,customRpcUrl){
+        return rpcManager('/apply',{
+          method:'POST',
+          headers:{'content-type':'application/json'},
+          body:JSON.stringify({provider,heliusApiKey,customRpcUrl})
+        },20000);
+      }
+      async function waitForGatewayRpc(provider,timeoutMs=50000){
+        await sleep(1500);
+        const start=Date.now();
+        let last=null;
+        while(Date.now()-start<timeoutMs){
+          try{
+            const status=await gateway(`/chains/solana/status?network=$${encodeURIComponent(NETWORK)}`,{},5000);
+            last=status;
+            const actual=classifyRpcUrl(status?.rpcUrl);
+            if(actual===provider || (provider==='custom'&&actual==='custom'))return status;
+          }catch{}
+          await sleep(1000);
+        }
+        throw new Error(`Gateway restarted but the requested $${provider} RPC did not become active$${last?.rpcUrl?` (current: $${redactRpcUrl(last.rpcUrl)})`:''}`);
+      }
+      function currentEffectiveTopic(app,mint) {
+        const token=(Array.isArray(app?.tokens)?app.tokens:[]).find(t=>t?.mint===mint);
+        const summary=(Array.isArray(app?.summaries)?app.summaries:[]).find(s=>s?.mint===mint)||{};
+        return String(summary.ntfy_effective_topic || token?.ntfy_topic || '');
+      }
+      function timeoutSignal(ms) {
+        const c = new AbortController();
+        const timer = setTimeout(() => c.abort(), ms);
+        return { signal: c.signal, clear: () => clearTimeout(timer) };
+      }
+      async function fetchJson(url, opts = {}, timeout = 10000) {
+        const t = timeoutSignal(timeout);
+        try {
+          const r = await fetch(url, { ...opts, signal: t.signal });
+          const text = await r.text();
+          let body;
+          try { body = text ? JSON.parse(text) : null; } catch { body = { raw: text }; }
+          if (!r.ok) {
+            const e = new Error(`HTTP $${r.status} $${typeof body === 'object' ? JSON.stringify(body).slice(0, 500) : text.slice(0, 500)}`);
+            e.statusCode = r.status; e.body = body;
+            throw e;
+          }
+          return body;
+        } finally { t.clear(); }
+      }
+      async function gateway(path, opts = {}, timeout = 12000) {
+        return fetchJson(`$${GATEWAY}$${path}`, opts, timeout);
+      }
+      async function postJson(url, body, timeout = 10000) {
+        return fetchJson(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        }, timeout);
+      }
+
+      let state = readJson(STATE_FILE, null);
+      if (!state || typeof state !== 'object') {
+        state = {
+          version: 6,
+          mode: 'testing',
+          master: false,
+          tokens: {},
+          selectedWallet: null,
+          walletBackups: {},
+          walletMeta: {},
+          minSolReserve: 0.02,
+          slippagePct: 1.0,
+          maxPriceImpactPct: 2.0,
+          maxTradeUSDC: 500,
+          tradingNtfyTopic: null,
+          requirePrivateTradingTopic: false,
+          burstPolicy: 'collapse',
+          burstWindowSec: 15,
+          safetyLock: false,
+          safetyReason: null,
+          lastReadiness: null,
+          updatedAt: nowIso(),
+        };
+      }
+      state.version = '10.2.2';
+      const startupPreviousMode = state.mode === 'trading' ? 'trading' : 'testing';
+      const startupPreviousMaster = state.master === true;
+      state.mode = 'testing'; // Restart safety: never resume unattended live trading after maintenance/restart.
+      state.master = false;
+      state.tokens = state.tokens && typeof state.tokens === 'object' ? state.tokens : {};
+      state.walletBackups = state.walletBackups && typeof state.walletBackups === 'object' ? state.walletBackups : {};
+      state.walletMeta = state.walletMeta && typeof state.walletMeta === 'object' ? state.walletMeta : {};
+      state.minSolReserve = Number.isFinite(Number(state.minSolReserve)) ? Number(state.minSolReserve) : 0.02;
+      state.slippagePct = Number.isFinite(Number(state.slippagePct)) ? Number(state.slippagePct) : 1.0;
+      state.maxPriceImpactPct = Number.isFinite(Number(state.maxPriceImpactPct)) && Number(state.maxPriceImpactPct) > 0
+        ? Math.min(25, Number(state.maxPriceImpactPct)) : 2.0;
+      state.maxTradeUSDC = Number.isFinite(Number(state.maxTradeUSDC)) && Number(state.maxTradeUSDC) > 0
+        ? Number(state.maxTradeUSDC) : 500;
+      if (!/^trade-[-_A-Za-z0-9]{32,60}$$/.test(String(state.tradingNtfyTopic || ''))) {
+        state.tradingNtfyTopic = `trade-$${crypto.randomBytes(24).toString('base64url')}`;
+      }
+      state.requirePrivateTradingTopic = state.requirePrivateTradingTopic === true;
+      state.burstPolicy = state.burstPolicy === 'every-alert' ? 'every-alert' : 'collapse';
+      state.burstWindowSec = Math.max(5, Math.min(300, Number(state.burstWindowSec || 15)));
+      state.safetyLock = state.safetyLock === true;
+      function saveState() { state.updatedAt = nowIso(); atomicJson(STATE_FILE, state); }
+      saveState();
+
+      let auth = readJson(AUTH_FILE, null);
+      function hashPassword(password, salt) {
+        return crypto.scryptSync(password, Buffer.from(salt, 'hex'), 64).toString('hex');
+      }
+      function setPassword(password, mustChange = false) {
+        const salt = crypto.randomBytes(32).toString('hex');
+        auth = {
+          salt,
+          hash: hashPassword(password, salt),
+          sessionSecret: auth?.sessionSecret || crypto.randomBytes(32).toString('hex'),
+          sessionVersion: Number(auth?.sessionVersion || 0) + 1,
+          mustChange,
+          updatedAt: nowIso(),
+        };
+        atomicJson(AUTH_FILE, auth);
+      }
+      if (!auth || !auth.hash || !auth.salt || !auth.sessionSecret) {
+        const initial = crypto.randomBytes(15).toString('base64url');
+        setPassword(initial, true);
+        console.log('');
+        console.log('================================================================');
+        console.log('[trading-controller] FIRST-RUN ADMIN PASSWORD');
+        console.log(`[trading-controller] $${initial}`);
+        console.log('[trading-controller] Log in at http://<server>:5680 and change it.');
+        console.log('================================================================');
+        console.log('');
+      }
+      function verifyPassword(password) {
+        try {
+          const a = Buffer.from(auth.hash, 'hex');
+          const b = Buffer.from(hashPassword(password, auth.salt), 'hex');
+          return a.length === b.length && crypto.timingSafeEqual(a, b);
+        } catch { return false; }
+      }
+      function sign(v) {
+        return crypto.createHmac('sha256', Buffer.from(auth.sessionSecret, 'hex')).update(v).digest('base64url');
+      }
+      function createSession() {
+        const payload = b64url(Buffer.from(JSON.stringify({
+          exp: Date.now() + 12 * 60 * 60 * 1000,
+          ver: auth.sessionVersion,
+          nonce: crypto.randomBytes(16).toString('hex'),
+        })));
+        return `$${payload}.$${sign(payload)}`;
+      }
+      function getCookies(req) {
+        const out = {};
+        for (const part of String(req.headers.cookie || '').split(';')) {
+          const i = part.indexOf('=');
+          if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+        }
+        return out;
+      }
+      function verifySession(req) {
+        try {
+          const token = getCookies(req).tc_session;
+          if (!token) return null;
+          const [payload, sig] = token.split('.');
+          const expected = sign(payload);
+          if (!sig || sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+          const obj = JSON.parse(b64urlDecode(payload).toString('utf8'));
+          if (obj.exp < Date.now() || obj.ver !== auth.sessionVersion) return null;
+          return { token, obj };
+        } catch { return null; }
+      }
+      function csrfFor(sessionToken) { return sign(`csrf:$${sessionToken}`); }
+      function parseForm(body) { return Object.fromEntries(new URLSearchParams(body)); }
+      function sessionCookie(value, maxAge) {
+        return `tc_session=$${encodeURIComponent(value)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=$${maxAge}$${DASHBOARD_COOKIE_SECURE?'; Secure':''}`;
+      }
+      function send(res, code, body, type = 'text/html; charset=utf-8', headers = {}) {
+        res.writeHead(code, {
+          'content-type': type,
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+          'x-frame-options': 'DENY',
+          'referrer-policy': 'no-referrer',
+          'permissions-policy': 'camera=(), microphone=(), geolocation=()',
+          'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+          ...headers
+        });
+        res.end(body);
+      }
+      function redirect(res, path) { send(res, 303, '', 'text/plain', { location: path }); }
+      async function readBody(req, max = 1024 * 1024) {
+        let body = '';
+        for await (const chunk of req) {
+          body += chunk;
+          if (body.length > max) throw new Error('request body too large');
+        }
+        return body;
+      }
+      function requireAdmin(req, res) {
+        const s = verifySession(req);
+        if (!s) { redirect(res, '/login'); return null; }
+        return s;
+      }
+      function checkCsrf(fields, session) {
+        const supplied = String(fields.csrf || '');
+        const expected = csrfFor(session.token);
+        return supplied.length === expected.length &&
+          crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+      }
+      function formHidden(session) {
+        return `<input type="hidden" name="csrf" value="$${html(csrfFor(session.token))}">`;
+      }
+
+      const loginAttempts = new Map();
+      function clientIp(req) {
+        return String(req.socket?.remoteAddress || 'unknown');
+      }
+      function loginStatus(req) {
+        const key = clientIp(req);
+        const row = loginAttempts.get(key) || {fails:0, blockedUntil:0};
+        if (row.blockedUntil && row.blockedUntil <= Date.now()) {
+          loginAttempts.delete(key);
+          return {blocked:false, retryAfter:0};
+        }
+        return {blocked:row.blockedUntil > Date.now(), retryAfter:Math.max(0, Math.ceil((row.blockedUntil-Date.now())/1000))};
+      }
+      function recordLoginFailure(req) {
+        const key = clientIp(req);
+        const row = loginAttempts.get(key) || {fails:0, blockedUntil:0};
+        row.fails += 1;
+        if (row.fails >= 5) row.blockedUntil = Date.now() + 5*60*1000;
+        loginAttempts.set(key,row);
+      }
+      function recordLoginSuccess(req) {
+        loginAttempts.delete(clientIp(req));
+      }
+      function cleanNickname(value) {
+        return String(value || '').trim().replace(/\s+/g,' ').slice(0,40);
+      }
+      function walletLabel(address) {
+        const nick = cleanNickname(state.walletMeta?.[address]?.nickname);
+        return nick || (address ? `$${address.slice(0,6)}…$${address.slice(-6)}` : 'No wallet');
+      }
+      function ensureWalletMeta(address) {
+        if (!address) return null;
+        if (!state.walletMeta[address] || typeof state.walletMeta[address] !== 'object') {
+          state.walletMeta[address] = {nickname:'',createdAt:null};
+        }
+        return state.walletMeta[address];
+      }
+
+      let seenList = readJson(SEEN_FILE, []);
+      if (!Array.isArray(seenList)) seenList = [];
+      seenList = seenList.slice(-MAX_SEEN);
+      let seen = new Set(seenList);
+      let trades = readJson(TRADES_FILE, []);
+      if (!Array.isArray(trades)) trades = [];
+      trades = trades.slice(-MAX_TRADES);
+      let audit = readJson(AUDIT_FILE, []);
+      if (!Array.isArray(audit)) audit = [];
+      audit = audit.slice(-MAX_AUDIT);
+      let triggerGuards = readJson(TRIGGER_GUARDS_FILE, {});
+      if (!triggerGuards || typeof triggerGuards !== 'object' || Array.isArray(triggerGuards)) triggerGuards = {};
+      function addAudit(kind, data = {}) {
+        boundedPush(audit, { at: nowIso(), kind, ...data }, MAX_AUDIT);
+        atomicJson(AUDIT_FILE, audit);
+      }
+      function saveTrades() { trades = trades.slice(-MAX_TRADES); atomicJson(TRADES_FILE, trades); }
+      function saveTriggerGuards() { atomicJson(TRIGGER_GUARDS_FILE, triggerGuards); }
+      function triggerGuardKey(mint,direction,target) {
+        return `$${mint}|$${direction}|$${Number(target).toPrecision(16)}`;
+      }
+      function pruneTriggerGuards(app) {
+        const tokens = Array.isArray(app?.tokens) ? app.tokens : [];
+        const valid = new Set();
+        for (const t of tokens) {
+          if (!t?.mint) continue;
+          for (const v of (Array.isArray(t.buy_alerts)?t.buy_alerts:[])) valid.add(triggerGuardKey(t.mint,'BUY',Number(v)));
+          for (const v of (Array.isArray(t.sell_alerts)?t.sell_alerts:[])) valid.add(triggerGuardKey(t.mint,'SELL',Number(v)));
+        }
+        let changed=false;
+        for (const key of Object.keys(triggerGuards)) {
+          if (!valid.has(key)) { delete triggerGuards[key]; changed=true; }
+        }
+        if (changed) saveTriggerGuards();
+      }
+      function guardStatus(token,direction,target) {
+        const key=triggerGuardKey(token.mint,direction,target);
+        const row=triggerGuards[key];
+        if (!row) return {blocked:false,key,row:null};
+        const resetMinutes=Number(token.alert_reset_minutes ?? 0);
+        if (resetMinutes > 0) {
+          const elapsed=Date.now()-new Date(row.at||0).getTime();
+          if (Number.isFinite(elapsed) && elapsed >= resetMinutes*60*1000) {
+            delete triggerGuards[key]; saveTriggerGuards();
+            return {blocked:false,key,row:null};
+          }
+        }
+        return {blocked:true,key,row};
+      }
+
+      // Crash/restart recovery: an unresolved submission is never silently retried.
+      const unresolvedOnStartup = trades.filter(t => ['SUBMITTING','PENDING'].includes(t.status));
+      if (unresolvedOnStartup.length) {
+        for (const t of unresolvedOnStartup) {
+          t.status='UNCERTAIN';
+          t.updatedAt=nowIso();
+          t.reason='Controller restarted while this transaction was unresolved';
+        }
+        state.safetyLock=true;
+        state.safetyReason=`$${unresolvedOnStartup.length} transaction(s) were unresolved when the controller restarted. Review before clearing.`;
+        state.mode='testing'; state.master=false;
+        saveTrades(); saveState();
+      }
+      if (startupPreviousMode === 'trading' || startupPreviousMaster) {
+        addAudit('RESTART_FORCED_SAFE',{previousMode:startupPreviousMode,previousMaster:startupPreviousMaster});
+      }
+      if (unresolvedOnStartup.length) {
+        addAudit('RESTART_UNRESOLVED_TRADES',{count:unresolvedOnStartup.length});
+      }
+
+      let pendingRecovery = new Map();
+      let pendingHandoffs = new Map();
+      let claimedHandoffs = new Map();
+      let activeTradeLock = null;
+      let desiredTopics = [];
+      let activeTopics = [];
+      let streamController = null;
+      let streamConnected = false;
+      let lastTopicRefreshAt = null;
+      let lastForwardedAt = null;
+      let lastForwardedId = null;
+      let lastDecision = null;
+      let lastError = null;
+      let reconnectDelay = 1000;
+      const gatewayTokenReadyMints = new Set();
+
+      async function getApp() {
+        return fetchJson(APP_API, {}, 8000);
+      }
+      function syncTokenControls(app) {
+        let changed = false;
+        const tokens = Array.isArray(app?.tokens) ? app.tokens : [];
+        for (const t of tokens) {
+          if (!t?.mint) continue;
+          if (!state.tokens[t.mint] || typeof state.tokens[t.mint] !== 'object') {
+            state.tokens[t.mint] = { autoBuy: false, autoSell: false, wallet: null };
+            changed = true;
+            continue;
+          }
+          const c=state.tokens[t.mint];
+          const normalized={
+            autoBuy:c.autoBuy===true,
+            autoSell:c.autoSell===true,
+            wallet:isMint(c.wallet)?String(c.wallet):null
+          };
+          if (c.autoBuy!==normalized.autoBuy || c.autoSell!==normalized.autoSell || c.wallet!==normalized.wallet) {
+            state.tokens[t.mint]=normalized;
+            changed=true;
+          }
+        }
+        pruneTriggerGuards(app);
+        if (changed) saveState();
+      }
+      async function getWallets() {
+        const w = await gateway('/wallet?showHardware=false', {}, 8000);
+        return Array.isArray(w) ? w : [];
+      }
+      function solanaWalletAddresses(wallets) {
+        const row = wallets.find(w => String(w.chain).toLowerCase() === 'solana');
+        return Array.isArray(row?.walletAddresses) ? row.walletAddresses : [];
+      }
+      async function getBalancesNormalized(wallet, mint, name) {
+        if (!wallet) return { configured: false, wallet: null, sol: null, usdc: null, token: null, raw: {} };
+        const tokens = ['SOL', 'USDC'];
+        if (mint && isMint(mint)) tokens.push(mint);
+        const r = await gateway('/chains/solana/balances', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ network: NETWORK, address: wallet, tokens }),
+        }, 15000);
+        const b = r?.balances && typeof r.balances === 'object' ? r.balances : {};
+        const findCI = key => {
+          const k = Object.keys(b).find(x => x.toLowerCase() === String(key).toLowerCase());
+          return k ? Number(b[k]) : null;
+        };
+        let token = mint ? findCI(mint) : null;
+        if (token === null && name) token = findCI(name);
+        if (token === null && mint) {
+          const candidates = Object.entries(b)
+            .filter(([k]) => !['SOL','USDC'].includes(k.toUpperCase()))
+            .map(([,v]) => Number(v));
+          if (candidates.length === 1) token = candidates[0];
+        }
+        return {
+          configured: true,
+          wallet,
+          sol: findCI('SOL') ?? 0,
+          usdc: findCI('USDC') ?? 0,
+          token: token ?? 0,
+          raw: b,
+        };
+      }
+      function requiredApiPathsPresent(docs) {
+        const paths = docs?.paths || {};
+        // Swagger/Fastify may expose a group-root endpoint as /wallet/ while
+        // the live server accepts /wallet. Normalise trailing slashes before comparing.
+        const normalizePath = p => {
+          const s = String(p || '');
+          return s.length > 1 ? s.replace(/\/+$$/, '') : s;
+        };
+        const documented = new Set(Object.keys(paths).map(normalizePath));
+        const required = [
+          '/wallet',
+          '/wallet/add',
+          '/tokens',
+          '/tokens/find/{address}',
+          '/chains/solana/status',
+          '/chains/solana/balances',
+          '/chains/solana/poll',
+          '/connectors/jupiter/router/quote-swap',
+          '/connectors/jupiter/router/execute-quote',
+        ];
+        const missing = required.filter(p => !documented.has(normalizePath(p)));
+        return { ok: missing.length === 0, missing };
+      }
+      async function readiness() {
+        const checks = [];
+        let app = null, wallets = [], docs = null, walletAddresses = [], solanaStatus = null, rpcManagerStatus = null;
+        const add = (id, label, ok, detail = '') => checks.push({ id, label, ok: !!ok, detail: String(detail || '') });
+
+        try {
+          app = await getApp(); syncTokenControls(app);
+          add('app', 'Jupiter Alerts API', Array.isArray(app.tokens), `$${app.tokens?.length || 0} token(s)`);
+        } catch (e) { add('app', 'Jupiter Alerts API', false, e.message); }
+
+        try {
+          const r = await fetch(N8N_HEALTH);
+          add('n8n', 'n8n', r.ok, `HTTP $${r.status}`);
+        } catch (e) { add('n8n', 'n8n', false, e.message); }
+
+        try {
+          const probeId=`readiness-$${crypto.randomBytes(8).toString('hex')}`;
+          const r=await fetch(N8N_WEBHOOK,{
+            method:'POST',
+            headers:{'content-type':'application/json'},
+            body:JSON.stringify({
+              event:'message',id:probeId,time:Math.floor(Date.now()/1000),
+              topic:'__jupiter_auto_trader_readiness__',
+              title:'Readiness Probe',message:'Readiness Probe',_handoff:'invalid-readiness-probe'
+            })
+          });
+          const body=await r.text();
+          add('workflow','Internal trading workflow',r.ok,
+            r.ok?`published webhook reachable (HTTP $${r.status})`:`HTTP $${r.status} $${body.slice(0,120)}`);
+        } catch(e) { add('workflow','Internal trading workflow',false,e.message); }
+
+        try {
+          const r = await gateway('/', {}, 6000);
+          add('gateway', 'Gateway', r?.status === 'ok' || !!r, r?.status || 'reachable');
+        } catch (e) { add('gateway', 'Gateway', false, e.message); }
+
+        try {
+          rpcManagerStatus=await getRpcManagerStatus();
+          add('rpcManager','RPC configuration manager',rpcManagerStatus?.ok===true,
+            rpcManagerStatus?.ok ? `$${String(rpcManagerStatus.provider||'unknown').toUpperCase()} configuration available` : 'unavailable');
+        } catch(e) { add('rpcManager','RPC configuration manager',false,e.message); }
+
+        if(app){
+          try{
+            const ts=await ensureGatewayTokensForApp(app);
+            add('gatewayTokens','Gateway token catalogue',ts.ok,
+              ts.ok?`$${ts.ready}/$${ts.total} enabled app token(s) ready`:
+              ts.failed.map(x=>`$${x.name||x.mint}: $${x.error}`).join(' | '));
+          }catch(e){add('gatewayTokens','Gateway token catalogue',false,e.message);}
+        }else add('gatewayTokens','Gateway token catalogue',false,'Jupiter Alerts API unavailable');
+
+        try {
+          solanaStatus = await gateway(`/chains/solana/status?network=$${encodeURIComponent(NETWORK)}`, {}, 10000);
+          add('solana', 'Solana mainnet', !!solanaStatus && solanaStatus.chain === 'solana',
+            `$${solanaStatus?.network || ''} block $${solanaStatus?.currentBlockNumber || solanaStatus?.currentBlock || '—'}`);
+        } catch (e) { add('solana', 'Solana mainnet', false, e.message); }
+
+        const rpcUrl=String(solanaStatus?.rpcUrl||'');
+        const rpcKind=classifyRpcUrl(rpcUrl);
+        const productionRpcOk=rpcKind==='helius'||rpcKind==='custom';
+        const rpcDetail=rpcKind==='helius'
+          ? 'Helius RPC active — suitable for Testing + Trading'
+          : rpcKind==='custom'
+            ? `Custom RPC active — $${redactRpcUrl(rpcUrl)}`
+            : rpcKind==='public'
+              ? 'Solana Public RPC active — Testing only; choose Helius or Custom before real trading'
+              : 'RPC unavailable/unknown';
+        add('productionRpc','Trading RPC',productionRpcOk,rpcDetail);
+
+        try {
+          docs = await gateway('/docs/json', {}, 8000);
+          const c = requiredApiPathsPresent(docs);
+          add('api', 'Gateway API compatibility', c.ok, c.ok ? `version $${docs?.info?.version || 'unknown'}` : `missing: $${c.missing.join(', ')}`);
+        } catch (e) { add('api', 'Gateway API compatibility', false, e.message); }
+
+        add('ntfy', 'ntfy listener', streamConnected && activeTopics.length > 0,
+          streamConnected ? `$${activeTopics.length} topic(s): $${activeTopics.join(', ')}` : 'not connected');
+
+        try {
+          const q = await gateway(`/connectors/jupiter/router/quote-swap?network=$${encodeURIComponent(NETWORK)}&baseToken=SOL&quoteToken=USDC&amount=0.001&side=SELL&slippagePct=$${encodeURIComponent(state.slippagePct)}`, {}, 12000);
+          add('quote', 'Jupiter/Gateway quote test', !!q?.quoteId && Number(q.amountOut) > 0,
+            q?.amountOut ? `0.001 SOL → $${q.amountOut} USDC` : 'no quote');
+        } catch (e) { add('quote', 'Jupiter/Gateway quote test', false, e.message); }
+
+        add('password', 'Admin password changed', auth.mustChange !== true, auth.mustChange ? 'change the first-run password' : 'yes');
+        add('safety', 'Safety lock clear', state.safetyLock !== true, state.safetyLock ? state.safetyReason || 'locked' : 'clear');
+
+        try {
+          wallets=await getWallets();
+          walletAddresses=solanaWalletAddresses(wallets);
+          add('walletInventory','Gateway Solana wallets',walletAddresses.length>0,
+            walletAddresses.length ? `$${walletAddresses.length} wallet(s) available` : 'no Solana wallets');
+        } catch(e) {
+          add('walletInventory','Gateway Solana wallets',false,e.message);
+        }
+
+        const enabledAutos=(Array.isArray(app?.tokens)?app.tokens:[]).filter(t=>{
+          const c=state.tokens[t.mint]||{};
+          return t.enabled===true && (c.autoBuy===true || c.autoSell===true);
+        });
+
+        const sourceDirectionProblems=[];
+        for(const t of enabledAutos){
+          const c=state.tokens[t.mint]||{};
+          if(c.autoBuy===true && (!Array.isArray(t.buy_alerts)||t.buy_alerts.length===0))
+            sourceDirectionProblems.push(`$${t.name}: AUTO BUY is ON but no BUY target is configured in Jupiter Alerts`);
+          if(c.autoSell===true && (!Array.isArray(t.sell_alerts)||t.sell_alerts.length===0))
+            sourceDirectionProblems.push(`$${t.name}: AUTO SELL is ON but no SELL target is configured in Jupiter Alerts`);
+        }
+        add('sourceDirections','Source price-alert directions',sourceDirectionProblems.length===0,
+          sourceDirectionProblems.length ? sourceDirectionProblems.join(' | ') :
+            (enabledAutos.length ? 'Every enabled AUTO direction has at least one configured Jupiter Alerts target' : 'no auto-enabled directions yet'));
+
+        const topicProblems=[];
+        if(state.requirePrivateTradingTopic){
+          for(const t of enabledAutos){
+            const topic=currentEffectiveTopic(app,t.mint);
+            if(topic!==state.tradingNtfyTopic){
+              topicProblems.push(`$${t.name}: effective ntfy topic does not match the controller-generated Trading Topic`);
+            }
+          }
+        }
+        add('triggerSecurity','Trading trigger policy',topicProblems.length===0,
+          state.requirePrivateTradingTopic
+            ? (topicProblems.length ? topicProblems.join(' | ') :
+                (enabledAutos.length ? `$${enabledAutos.length} auto-enabled coin(s) use the required private Trading Topic` : 'private Trading Topic required; no auto-enabled coins yet'))
+            : 'Shared/custom ntfy topics allowed — exact full mint + current effective topic + target are still validated');
+
+        const riskCapsOk=Number.isFinite(Number(state.maxPriceImpactPct)) && Number(state.maxPriceImpactPct)>0 &&
+          Number(state.maxPriceImpactPct)<=25 && Number.isFinite(Number(state.maxTradeUSDC)) && Number(state.maxTradeUSDC)>0;
+        add('riskCaps','Execution risk caps',riskCapsOk,
+          `max impact $${state.maxPriceImpactPct}% · max trade $${state.maxTradeUSDC} USDC · slippage $${state.slippagePct}%`);
+
+        const assignmentProblems=[];
+        const assignedWallets=new Set();
+        for(const t of enabledAutos){
+          const c=state.tokens[t.mint]||{};
+          const w=c.wallet||null;
+          if(!w){assignmentProblems.push(`$${t.name}: no trading wallet assigned`);continue;}
+          if(!walletAddresses.includes(w)){assignmentProblems.push(`$${t.name}: assigned wallet is not present in Gateway`);continue;}
+          if(state.walletBackups[w]!==true){assignmentProblems.push(`$${t.name}: $${walletLabel(w)} recovery backup not confirmed`);continue;}
+          assignedWallets.add(w);
+        }
+        add('assignments','Per-coin trading wallet assignments',assignmentProblems.length===0,
+          assignmentProblems.length ? assignmentProblems.join(' | ') :
+            (enabledAutos.length ? `$${enabledAutos.length} auto-enabled coin(s) have valid backed-up wallet assignments` : 'no auto-enabled coins yet'));
+
+        const solProblems=[];
+        for(const w of assignedWallets){
+          try{
+            const b=await getBalancesNormalized(w,null,null);
+            if(Number(b.sol)<Number(state.minSolReserve)) solProblems.push(`$${walletLabel(w)}: $${b.sol} SOL < reserve $${state.minSolReserve}`);
+          }catch(e){solProblems.push(`$${walletLabel(w)}: $${e.message}`);}
+        }
+        add('assignedSol','SOL reserve on assigned wallets',solProblems.length===0,
+          solProblems.length ? solProblems.join(' | ') :
+            (assignedWallets.size ? `$${assignedWallets.size} assigned wallet(s) meet reserve` : 'no assigned auto-trading wallets yet'));
+
+        add('fundsPolicy','Trade-specific balance checks',true,'Exact assigned-wallet USDC/token balance is re-read immediately before every trade');
+
+        const coreIds=['app','n8n','workflow','gateway','gatewayTokens','solana','api','ntfy','quote'];
+        const tradingIds=[...coreIds,'password','safety','rpcManager','productionRpc','triggerSecurity','riskCaps','sourceDirections','walletInventory','assignments','assignedSol','fundsPolicy'];
+        const coreOk=coreIds.every(id=>checks.find(c=>c.id===id)?.ok);
+        const tradingOk=tradingIds.every(id=>checks.find(c=>c.id===id)?.ok);
+        const result={at:nowIso(),coreOk,tradingOk,checks};
+        state.lastReadiness=result;saveState();
+        return result;
+      }
+      function healthyClass(ok) { return ok ? 'good' : 'bad'; }
+
+      async function dashboard(req, session, notice = '') {
+        let app = { tokens: [], summaries: [] }, wallets = [], balances = null;
+        let appError = '', gatewayError = '', rpcError = '', rpcManagerInfo = null, solanaLive = null;
+        try { app = await getApp(); syncTokenControls(app); } catch (e) { appError = e.message; }
+        try { wallets = await getWallets(); } catch (e) { gatewayError = e.message; }
+        try { rpcManagerInfo=await getRpcManagerStatus(); } catch(e) { rpcError=e.message; }
+        try { solanaLive=await gateway(`/chains/solana/status?network=$${encodeURIComponent(NETWORK)}`,{},8000); } catch(e) { if(!gatewayError)gatewayError=e.message; }
+        const addresses = solanaWalletAddresses(wallets);
+        if (state.selectedWallet && addresses.includes(state.selectedWallet)) {
+          try { balances = await getBalancesNormalized(state.selectedWallet, null, null); } catch {}
+        }
+        const summaries = Array.isArray(app.summaries) ? app.summaries : [];
+        const sm = new Map(summaries.map(s => [s.mint, s]));
+        const tokens = Array.isArray(app.tokens) ? app.tokens : [];
+        const csrf = formHidden(session);
+        const last = state.lastReadiness;
+        const modeTrading = state.mode === 'trading';
+
+        const rows = tokens.map(t => {
+          const c = state.tokens[t.mint] || { autoBuy:false, autoSell:false, wallet:null };
+          const s = sm.get(t.mint) || {};
+          const buyTargets=Array.isArray(t.buy_alerts)?t.buy_alerts:[];
+          const sellTargets=Array.isArray(t.sell_alerts)?t.sell_alerts:[];
+          const buyConfigured=buyTargets.length>0;
+          const sellConfigured=sellTargets.length>0;
+          const walletOptions = `<option value="">— No wallet assigned —</option>` + addresses.map(a => {
+            const label=`$${walletLabel(a)} — $${a.slice(0,6)}…$${a.slice(-6)}`;
+            return `<option value="$${html(a)}" $${c.wallet===a?'selected':''}>$${html(label)}</option>`;
+          }).join('');
+          const assignmentStatus = c.wallet
+            ? (addresses.includes(c.wallet)
+                ? `$${state.walletBackups[c.wallet]===true?'✅':'⚠️'} $${html(walletLabel(c.wallet))}`
+                : '❌ Assigned wallet missing from Gateway')
+            : '⚪ Unassigned';
+          return `<tr>
+            <td><b>$${html(t.name)}</b><div class="mint">$${html(t.mint)}</div></td>
+            <td>$${t.enabled ? '✅ Enabled' : '⛔ Disabled'}</td>
+            <td>$${html(formatBalance(t.usd_amount,6))} USDC</td>
+            <td>
+              <small><b>BUY:</b> $${buyConfigured ? html(buyTargets.map(formatPrice).join(', ')) : '<span class="muted">No target</span>'}<br>
+              <b>SELL:</b> $${sellConfigured ? html(sellTargets.map(formatPrice).join(', ')) : '<span class="muted">No target</span>'}</small>
+            </td>
+            <td><small>$${html(s.ntfy_effective_topic || t.ntfy_topic || '—')}</small></td>
+            <td><select name="wallet_$${html(t.mint)}">$${walletOptions}</select><div class="muted" style="margin-top:5px">$${assignmentStatus}</div></td>
+            <td>
+              <label title="$${buyConfigured?'Triggered only by a fresh Jupiter BUY ntfy alert':'Configure a BUY target in Jupiter Alerts first'}">
+                <input type="checkbox" name="autoBuy_$${html(t.mint)}" $${c.autoBuy ? 'checked' : ''} $${t.enabled&&buyConfigured ? '' : 'disabled'}> AUTO BUY
+              </label>
+              $${buyConfigured?'':'<small class="muted"> · no BUY target</small>'}<br>
+              <label title="$${sellConfigured?'Triggered only by a fresh Jupiter SELL ntfy alert':'Configure a SELL target in Jupiter Alerts first'}">
+                <input type="checkbox" name="autoSell_$${html(t.mint)}" $${c.autoSell ? 'checked' : ''} $${t.enabled&&sellConfigured ? '' : 'disabled'}> AUTO SELL
+              </label>
+              $${sellConfigured?'':'<small class="muted"> · no SELL target</small>'}
+            </td>
+          </tr>`;
+        }).join('');
+
+        let balanceRows = '';
+        if (state.selectedWallet) {
+          try {
+            const reqTokens = ['SOL','USDC', ...tokens.map(t => t.mint)];
+            const br = await gateway('/chains/solana/balances', {
+              method:'POST', headers:{'content-type':'application/json'},
+              body:JSON.stringify({network:NETWORK,address:state.selectedWallet,tokens:reqTokens})
+            }, 15000);
+            const raw = br?.balances || {};
+            balanceRows += `<tr><td>SOL</td><td>$${html(formatBalance(raw.SOL ?? 0,9))}</td></tr>`;
+            balanceRows += `<tr><td>USDC</td><td>$${html(formatBalance(raw.USDC ?? 0,6))}</td></tr>`;
+            for (const t of tokens) {
+              const val = raw[t.mint] ?? raw[t.name] ?? raw[String(t.name).toUpperCase()] ?? null;
+              balanceRows += `<tr><td>$${html(t.name)}</td><td>$${html(val===null?'—':formatBalance(val,8))}</td></tr>`;
+            }
+          } catch (e) { balanceRows = `<tr><td colspan="2">Balance error: $${html(e.message)}</td></tr>`; }
+        }
+
+        const walletCards = addresses.map(a => {
+          ensureWalletMeta(a);
+          const selected = a === state.selectedWallet;
+          const nick = cleanNickname(state.walletMeta[a]?.nickname);
+          const backed = state.walletBackups[a] === true;
+          const assignedCoins=tokens.filter(t=>state.tokens[t.mint]?.wallet===a).map(t=>t.name);
+          return `<div class="walletcard $${selected?'selectedwallet':''}">
+            <div><b>$${html(nick || 'Unnamed wallet')}</b> $${selected?'<span class="pill">VIEWING / DEFAULT</span>':''}</div>
+            <div class="mint">$${html(a)}</div>
+            <div style="margin:8px 0">Recovery backup: $${backed?'✅ confirmed':'❌ not confirmed'}</div>
+            <div style="margin:8px 0">Assigned coins: <b>$${html(assignedCoins.join(', ') || 'None')}</b></div>
+            <form method="post" action="/admin/wallet/rename" style="margin:6px 0">$${csrf}
+              <input type="hidden" name="address" value="$${html(a)}">
+              <input name="nickname" maxlength="40" value="$${html(nick)}" placeholder="Optional nickname">
+              <button>Save name</button>
+            </form>
+            $${selected ? '' : `<form method="post" action="/admin/wallet/select" style="margin:6px 0">$${csrf}
+              <input type="hidden" name="address" value="$${html(a)}">
+              <button class="primary">View / make Gateway default</button>
+            </form>`}
+          </div>`;
+        }).join('') || '<p>No Solana wallets in Gateway yet.</p>';
+
+        const activeGuards = Object.entries(triggerGuards).filter(([,v])=>v && typeof v==='object');
+        const autoEnabledTokens=tokens.filter(t=>{
+          const c=state.tokens[t.mint]||{};
+          return t.enabled===true&&(c.autoBuy===true||c.autoSell===true);
+        });
+        const tradingTopicRows=autoEnabledTokens.map(t=>{
+          const current=String((sm.get(t.mint)||{}).ntfy_effective_topic||t.ntfy_topic||'');
+          const ok=current===state.tradingNtfyTopic;
+          return `<div class="check"><span>$${ok?'✅':'❌'} $${html(t.name)}</span><small>$${ok?'Trading Topic active':`Current: $${html(current||'none')}`}</small></div>`;
+        }).join('') || '<p class="muted">No auto-enabled coins yet.</p>';
+        const tradingTopicReady=!state.requirePrivateTradingTopic ||
+          autoEnabledTokens.every(t=>String((sm.get(t.mint)||{}).ntfy_effective_topic||t.ntfy_topic||'')===state.tradingNtfyTopic);
+        const triggerGuardHtml = activeGuards.length
+          ? `<div class="banner warn"><b>$${activeGuards.length} live-trading trigger guard(s) armed.</b><br><small>These prevent the same price threshold being traded repeatedly. A guard is automatically removed when its target is removed from Jupiter Alerts; timed alerts expire with their configured reset period.</small></div>`
+          : '<p class="muted">No live-trading trigger guards are currently armed.</p>';
+
+        const activeRpcKind=classifyRpcUrl(solanaLive?.rpcUrl);
+        const activeRpcLabel=activeRpcKind==='helius'?'Helius':activeRpcKind==='custom'?'Custom RPC':activeRpcKind==='public'?'Solana Public':'Unknown';
+        const activeRpcTradingReady=activeRpcKind==='helius'||activeRpcKind==='custom';
+        const activeRpcDisplay=redactRpcUrl(solanaLive?.rpcUrl||rpcManagerInfo?.nodeURLRedacted||'');
+        const readinessHtml = last ? last.checks.map(c =>
+          `<div class="check"><span>$${c.ok ? '✅' : '❌'} $${html(c.label)}</span><small>$${html(c.detail)}</small></div>`
+        ).join('') : '<p class="muted">Run Quick Test Everything to populate readiness.</p>';
+
+        const tradesHtml = trades.slice(-10).reverse().map(t =>
+          `<tr><td>$${html(t.at || t.updatedAt)}</td><td>$${html(t.name)}</td><td>$${html(t.direction)}</td><td>$${html(t.status)}</td><td>$${Number.isFinite(Number(t.priceImpactPercent))?html(Number(t.priceImpactPercent).toFixed(2)+'%'):'—'}</td><td class="mint">$${html(t.signature || '—')}</td></tr>`
+        ).join('') || '<tr><td colspan="6"><div class="empty">No live trades yet.</div></td></tr>';
+
+        const n8nHost = String(req.headers.host || 'falcon.local').split(':')[0];
+        const warning = auth.mustChange ? `<div class="banner bad">Change the first-run admin password before Trading Mode can be enabled.</div>` : '';
+        const lock = state.safetyLock ? `<div class="banner bad"><b>SAFETY LOCK:</b> $${html(state.safetyReason || 'An uncertain transaction requires review.')}</div>` : '';
+
+        return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>Jupiter Auto Trader</title>
+      <style>
+      body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#0f1217;color:#edf2f7;margin:0}
+      .wrap{max-width:1200px;margin:26px auto;padding:0 16px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}
+      .card{background:#171b22;border:1px solid #2a313c;border-radius:14px;padding:18px;margin:14px 0}
+      .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;align-items:start;grid-auto-rows:max-content}
+      .banner{padding:12px 14px;border-radius:10px;margin:10px 0}.good{background:#10291a;border:1px solid #285e38}.bad{background:#351718;border:1px solid #7d3034}.warn{background:#332814;border:1px solid #725b28}
+      .mode{font-size:22px;font-weight:800}.testing{color:#ffd36a}.trading{color:#74f09a}.muted{color:#9aa7b7}.mint{font-family:ui-monospace,monospace;font-size:11px;word-break:break-all;color:#a5b1c0}
+      button{border:0;border-radius:9px;padding:9px 13px;font-weight:700;cursor:pointer}input,select{padding:8px;border-radius:7px;border:1px solid #48515e;background:#10141a;color:#fff}
+      table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid #29303a;vertical-align:top}th{color:#a8b4c3;font-size:12px;text-transform:uppercase}
+      .check{display:flex;justify-content:space-between;gap:15px;padding:7px 0;border-bottom:1px solid #29303a}.check small{text-align:right;color:#9aa7b7}
+      a{color:#9dcbff}.inline{display:inline}.danger{background:#7b2226;color:#fff}.primary{background:#e8edf5;color:#101216}.safe{background:#1e6937;color:#fff}
+      .walletgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;align-items:start}.walletcard{border:1px solid #303846;border-radius:11px;padding:12px;background:#12161c}.selectedwallet{border-color:#3a8f55;background:#112319}.pill{font-size:11px;background:#276a3d;padding:3px 7px;border-radius:999px;margin-left:6px}
+      details.panel{background:#171b22;border:1px solid #2a313c;border-radius:14px;margin:12px 0;overflow:hidden}
+      details.panel>summary{list-style:none;cursor:pointer;padding:16px 18px;font-weight:750;display:flex;align-items:center;justify-content:space-between;gap:16px;user-select:none}
+      details.panel>summary::-webkit-details-marker{display:none}
+      details.panel>summary:after{content:'＋';font-size:18px;color:#8fa1b5;font-weight:500}
+      details.panel[open]>summary:after{content:'−'}
+      details.panel[open]>summary{border-bottom:1px solid #29303a}
+      .panelbody{padding:16px 18px}.summarymeta{font-size:12px;font-weight:500;color:#94a3b5;margin-left:auto;text-align:right}
+      .statusrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.chip{font-size:12px;padding:5px 8px;border-radius:999px;background:#222934;border:1px solid #333d4b;color:#c6d0db}.chip.ok{background:#10291a;border-color:#285e38}.chip.warnchip{background:#332814;border-color:#725b28}
+      .hero{padding:16px 18px}.hero h2{margin:0 0 8px}.compactline{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.sectiontitle{margin:22px 2px 8px;color:#9aa7b7;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+      .empty{padding:20px;text-align:center;color:#91a0b2}
+      @media(max-width:700px){table{display:block;overflow-x:auto}.check{display:block}.check small{display:block;text-align:left;margin-left:25px}.summarymeta{display:none}}
+      </style></head><body><div class="wrap">
+      <div class="top"><div><h1>🤖 Jupiter Auto Trader</h1><div class="muted">Jupiter USDC Price Alerts → ntfy → n8n → Hummingbot Gateway</div></div>
+      <div><span class="muted">Workflow engine: internal</span> &nbsp; <a href="/machine.json" target="_blank">Diagnostics ↗</a></div></div>
+      $${notice ? `<div class="banner good">$${html(notice)}</div>` : ''}$${warning}$${lock}
+
+      <div class="grid">
+      <div class="card hero">
+        <div class="compactline">
+          <div>
+            <h2>Auto Trader</h2>
+            <div class="mode $${modeTrading ? 'trading' : 'testing'}">$${modeTrading ? '🟢 TRADING' : '🧪 TESTING'}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:12px;color:#9aa7b7;margin-bottom:6px">MASTER</div>
+            <div style="font-weight:800;margin-bottom:8px">$${state.master ? '🟢 ON' : '⚪ OFF'}</div>
+            <form method="post" action="/admin/master">$${csrf}
+              <input type="hidden" name="value" value="$${state.master ? 'off' : 'on'}">
+              <button class="$${state.master ? 'danger' : 'safe'}">$${state.master ? 'Turn MASTER OFF' : 'Turn MASTER ON'}</button>
+            </form>
+          </div>
+        </div>
+        <div class="statusrow">
+          <span class="chip $${last?.coreOk?'ok':'warnchip'}">Testing $${last?.coreOk?'ready':'not verified'}</span>
+          <span class="chip $${last?.tradingOk?'ok':'warnchip'}">Trading $${last?.tradingOk?'ready':'not ready'}</span>
+          <span class="chip $${streamConnected?'ok':'warnchip'}">ntfy $${streamConnected?'connected':'offline'}</span>
+          <span class="chip">Impact ≤ $${html(state.maxPriceImpactPct)}%</span>
+          <span class="chip">Trade ≤ $${html(state.maxTradeUSDC)} USDC</span>
+        </div>
+      </div>
+
+      <div class="card hero">
+        <div class="compactline">
+          <div>
+            <h2>Mode</h2>
+            <div class="muted">$${modeTrading ? 'Real transactions are permitted when MASTER and coin controls allow them.' : 'Validation only — transaction execution is blocked.'}</div>
+          </div>
+          <form method="post" action="/admin/mode">$${csrf}
+          $${modeTrading
+            ? '<input type="hidden" name="mode" value="testing"><button class="primary">Switch to TESTING</button>'
+            : '<input type="hidden" name="mode" value="trading"><input name="confirm" placeholder="type ENABLE TRADING"><button class="danger">Enable TRADING</button>'}
+          </form>
+        </div>
+        <p class="muted" style="margin-bottom:0">Every controller restart returns to TESTING with MASTER OFF.</p>
+      </div>
+      </div>
+
+      <details class="panel">
+        <summary>
+          <span>🔎 Quick Test & readiness</span>
+          <span class="summarymeta">Testing $${last?.coreOk?'✅':'⚠️'} · Trading $${last?.tradingOk?'✅':'⚠️'}</span>
+        </summary>
+        <div class="panelbody">
+          <form method="post" action="/admin/readiness">$${csrf}<button class="primary">Run Quick Test Everything</button></form>
+          <div style="margin-top:12px">$${readinessHtml}</div>
+        </div>
+      </details>
+
+      <div class="sectiontitle">Trading</div>
+      <div class="card">
+      <h2>Coins / Automation</h2>
+      $${appError ? `<div class="banner bad">App API: $${html(appError)}</div>` : ''}
+      <form method="post" action="/admin/controls">$${csrf}
+      <table><thead><tr><th>Coin</th><th>Source</th><th>Scenario</th><th>Configured targets</th><th>ntfy</th><th>Trading wallet</th><th>Automation</th></tr></thead><tbody>$${rows}</tbody></table>
+      <p class="muted"><b>Configured targets are reference/validation data, not an armed-state indicator.</b> A trade starts only from a fresh normal BUY/SELL ntfy alert. After Jupiter Alerts fires a target it may show that source alert as inactive until reset/cooldown; that is normal and does not need to be mirrored here. Trading Wallet is attached to the exact mint. Saving controls/assignments returns to TESTING with MASTER OFF.</p>
+      <div style="margin-top:14px"><button class="primary">Save coin controls</button></div></form>
+      </div>
+
+      <div class="card">
+        <div class="compactline"><h2 style="margin:0">Recent Trades</h2><span class="muted">Latest activity</span></div>
+        <div style="margin-top:10px">
+          <table><thead><tr><th>Time</th><th>Token</th><th>Side</th><th>Status</th><th>Impact</th><th>Signature</th></tr></thead><tbody>$${tradesHtml}</tbody></table>
+        </div>
+      </div>
+
+      <div class="sectiontitle">Setup & advanced</div>
+
+      <details class="panel" id="wallets">
+      <summary>
+        <span>👛 Wallets</span>
+        <span class="summarymeta">$${addresses.length} wallet(s) · $${tokens.filter(t=>state.tokens[t.mint]?.wallet).length} coin assignment(s)</span>
+      </summary>
+      <div class="panelbody">
+      $${gatewayError ? `<div class="banner bad">$${html(gatewayError)}</div>` : ''}
+      <p><b>Wallet currently viewed / Gateway default:</b> $${state.selectedWallet ? `<b>$${html(walletLabel(state.selectedWallet))}</b><br><span class="mint">$${html(state.selectedWallet)}</span>` : 'No wallet selected'}</p>
+      <p><b>Automatic trades do not rely on this default.</b> Each coin uses its explicitly assigned Trading Wallet. Switching the viewed/default wallet still forces <b>TESTING MODE + MASTER OFF</b> as a safe configuration change.</p>
+
+      <form method="post" action="/admin/wallet/create">$${csrf}
+        <input name="nickname" maxlength="40" placeholder="Optional nickname, e.g. Small Test Wallet">
+        <button class="safe" $${state.mode==='testing' && !state.master && !activeTradeLock ? '' : 'disabled'}>➕ Create new dedicated bot wallet</button>
+      </form>
+      <p class="muted">The nickname is stored only by this controller. Gateway/Solana identify wallets by address. Creation requires TESTING mode, MASTER OFF, and no trade in progress.</p>
+
+      <div class="walletgrid">$${walletCards}</div>
+      $${state.selectedWallet && !state.walletBackups[state.selectedWallet] ? `<div class="banner warn"><b>Selected wallet backup is not confirmed.</b>
+      <form method="post" action="/admin/wallet/mark-backed-up">$${csrf}<input name="confirm" placeholder="type I HAVE THE KEY"><button>Mark selected wallet backed up</button></form></div>` : ''}
+      <p class="muted">There is intentionally no one-click Delete Wallet button. Removing an encrypted signer is an advanced recovery-sensitive action.</p>
+      </div>
+      </details>
+
+      <details class="panel">
+      <summary>
+        <span>💰 Wallet balances</span>
+        <span class="summarymeta">$${state.selectedWallet ? html(walletLabel(state.selectedWallet)) : 'No wallet selected'}</span>
+      </summary>
+      <div class="panelbody">
+      <h3 style="margin-top:0">Viewed wallet balances</h3>
+      $${state.selectedWallet ? `<table><thead><tr><th>Asset</th><th>Balance</th></tr></thead><tbody>$${balanceRows}</tbody></table>` : '<p>No wallet selected.</p>'}
+      <p class="muted">Balances are read live through Gateway. Auto BUY checks USDC; Auto SELL checks the exact token mint; every real trade also checks the SOL reserve immediately before execution.</p>
+      </div>
+      </details>
+
+      <details class="panel">
+      <summary><span>🛡 Trigger & replay protection</span><span class="summarymeta">$${state.requirePrivateTradingTopic?(tradingTopicReady?'Private topic ✅':'Private topic ⚠️'):'Shared topics ✅'} · $${activeGuards.length} guard(s)</span></summary>
+      <div class="panelbody">
+      <h3 style="margin-top:0">ntfy Topic Policy</h3>
+      <form method="post" action="/admin/ntfy/policy">$${csrf}
+        <label>
+          <input type="checkbox" name="requirePrivateTradingTopic" $${state.requirePrivateTradingTopic?'checked':''}>
+          Require private Trading Topic for real trading
+        </label>
+        <button style="margin-left:8px">Save policy</button>
+      </form>
+      <p class="muted"><b>Default: OFF.</b> Shared topics are supported. JIM and SRE may use the same topic because every normal alert contains the full mint, and the controller validates that mint against the current app configuration and effective topic before Gateway is called.</p>
+
+      <div class="banner $${state.requirePrivateTradingTopic?(tradingTopicReady?'good':'warn'):'good'}">
+        $${state.requirePrivateTradingTopic
+          ? (tradingTopicReady?'Private-topic enforcement is satisfied ✅':'Private-topic enforcement is ON but not all auto-enabled coins use the generated topic ⚠️')
+          : 'Shared/custom topics allowed ✅'}
+      </div>
+
+      <details>
+        <summary style="cursor:pointer">Optional generated private topic</summary>
+        <div style="margin-top:10px">
+          <div class="mint" style="font-size:13px;background:#0b0e12;padding:12px;border-radius:8px;user-select:all">$${html(state.tradingNtfyTopic)}</div>
+          <p class="muted">Use this generated value if you want the stricter private-topic mode. It is optional.</p>
+          $${state.requirePrivateTradingTopic?tradingTopicRows:''}
+          <form method="post" action="/admin/ntfy/rotate">$${csrf}
+            <input name="confirm" placeholder="type ROTATE TRADING TOPIC">
+            <button class="danger">Rotate generated topic</button>
+          </form>
+        </div>
+      </details>
+      <hr style="border-color:#29303a">
+      <h3>Price-threshold replay guards</h3>
+      $${triggerGuardHtml}
+      <p class="muted">Default real-money behaviour mirrors the alert idea: a price threshold cannot be traded repeatedly just because duplicate/forged ntfy events arrive.</p>
+      $${activeGuards.length ? `<form method="post" action="/admin/guards/reset">$${csrf}<input name="confirm" placeholder="type RESET TRIGGER GUARDS"> <button class="danger">Reset all trigger guards</button></form>
+      <p class="muted">Only use this after intentionally resetting/re-arming price alerts in Jupiter USDC Price Alerts. This action also forces TESTING + MASTER OFF.</p>` : ''}
+      </div>
+      </details>
+
+      <details class="panel">
+      <summary><span>🌐 Solana RPC</span><span class="summarymeta">$${html(activeRpcLabel)} $${activeRpcTradingReady?'✅':'⚠️ Testing only'}</span></summary>
+      <div class="panelbody">
+      <h3 style="margin-top:0">One RPC for Testing + Trading</h3>
+      <p>Once configured, the same RPC is used in both modes. That means the blockchain connection you dry-run is the same one that later submits real transactions.</p>
+      <div class="banner $${activeRpcTradingReady?'good':'warn'}">
+        <b>Current:</b> $${html(activeRpcLabel)}<br>
+        <span class="mint">$${html(activeRpcDisplay||'—')}</span><br>
+        $${activeRpcKind==='public'
+          ? '<small>Public Solana RPC is allowed for Testing but intentionally does not satisfy Trading Ready.</small>'
+          : '<small>This RPC satisfies the Trading RPC requirement when the live health check passes.</small>'}
+      </div>
+      $${rpcError?`<div class="banner bad">RPC manager: $${html(rpcError)}</div>`:''}
+
+      <form method="post" action="/admin/rpc/apply">$${csrf}
+      <label>Provider<br>
+      <select name="rpcProvider">
+        <option value="public" $${activeRpcKind==='public'?'selected':''}>Solana Public — Testing only</option>
+        <option value="helius" $${activeRpcKind==='helius'?'selected':''}>Helius — recommended, free tier available</option>
+        <option value="custom" $${activeRpcKind==='custom'?'selected':''}>Custom RPC — advanced</option>
+      </select></label><br><br>
+
+      <label>Helius API key<br>
+      <input type="password" name="heliusApiKey" autocomplete="new-password" placeholder="$${rpcManagerInfo?.heliusKeyConfigured?'Already configured — leave blank to keep it':'Paste Helius API key'}" style="min-width:min(520px,90%)"></label>
+      <p class="muted">Only needed when selecting Helius. The key is written directly to Gateway's config and is never sent to n8n or stored in controller state. <a href="https://www.helius.dev/" target="_blank" rel="noreferrer">Get a Helius key ↗</a></p>
+
+      <label>Custom Solana RPC URL<br>
+      <input type="password" name="customRpcUrl" autocomplete="off" placeholder="https://your-rpc.example/..." style="min-width:min(520px,90%)"></label>
+      <p class="muted">Only needed for Custom RPC. URLs may contain provider API keys, so they are never shown back unredacted.</p>
+
+      <button class="primary">Test & Apply RPC</button>
+      </form>
+      <p class="muted"><b>Safety:</b> changing RPC is only allowed in TESTING with MASTER OFF. The RPC is tested first; then Gateway is restarted internally and the dashboard verifies the requested provider actually became active.</p>
+      </div>
+      </details>
+
+      <details class="panel">
+      <summary><span>⚙️ Safety settings</span><span class="summarymeta">Impact ≤$${html(state.maxPriceImpactPct)}% · Trade ≤$${html(state.maxTradeUSDC)} USDC · SOL $${html(state.minSolReserve)}</span></summary>
+      <div class="panelbody">
+      <form method="post" action="/admin/safety">$${csrf}
+      <label>Minimum SOL reserve<br><input type="number" name="minSolReserve" step="0.001" min="0" value="$${html(state.minSolReserve)}"></label><br><br>
+      <label>Gateway slippage %<br><input type="number" name="slippagePct" step="0.1" min="0" max="10" value="$${html(state.slippagePct)}"></label><br>
+      <span class="muted">Tolerance for price movement after a quote. This is different from price impact.</span><br><br>
+      <label>Maximum price impact %<br><input type="number" name="maxPriceImpactPct" step="0.1" min="0.1" max="25" value="$${html(state.maxPriceImpactPct)}"></label><br>
+      <span class="muted">Hard block on every Gateway quote. Jupiter reports impact as a decimal; the controller converts it to % before comparing.</span><br><br>
+      <label>Maximum trade scenario (USDC)<br><input type="number" name="maxTradeUSDC" step="1" min="1" max="1000000" value="$${html(state.maxTradeUSDC)}"></label><br>
+      <span class="muted">Independent cap protecting against an accidental oversized usd_amount in Jupiter Alerts.</span><br><br>
+      <label>Multiple thresholds<br><select name="burstPolicy">
+      <option value="collapse" $${state.burstPolicy==='collapse'?'selected':''}>Safest: one real trade per coin/direction burst</option>
+      <option value="every-alert" $${state.burstPolicy==='every-alert'?'selected':''}>Advanced: trade every fired alert</option></select></label><br><br>
+      <label>Burst window seconds<br><input type="number" name="burstWindowSec" min="5" max="300" value="$${html(state.burstWindowSec)}"></label><br><br>
+      <button>Save safety settings</button>
+      </form>
+      </div>
+      </details>
+
+      <details class="panel">
+      <summary><span>🔌 Gateway & listener</span><span class="summarymeta">$${gatewayError?'Gateway issue':'Gateway ✅'} · ntfy $${streamConnected?'✅':'⚠️'}</span></summary>
+      <div class="panelbody">
+      <p>Gateway: <b>$${gatewayError ? '❌' : '✅ reachable'}</b></p>
+      <p>ntfy stream: <b>$${streamConnected ? '✅ connected' : '❌ disconnected'}</b></p>
+      <p>Topics: <span class="mint">$${html(activeTopics.join(', ') || '—')}</span></p>
+      <p>Last ntfy: $${html(lastForwardedAt || '—')}</p>
+      <p>Last decision: <b>$${html(lastDecision || '—')}</b></p>
+      <p><a href="/gateway" target="_blank">Open Gateway Diagnostics ↗</a><br><a href="/machine.json" target="_blank">View full machine state ↗</a></p>
+      </div>
+      </details>
+
+      $${state.safetyLock ? `<div class="card"><h2>Resolve safety lock</h2><p>Only clear this after checking the wallet/transaction state. No automatic retry is performed.</p>
+      <form method="post" action="/admin/clear-lock">$${csrf}<input name="confirm" placeholder="type CLEAR SAFETY LOCK"> <button class="danger">Clear lock</button></form></div>` : ''}
+
+
+      $${auth.mustChange ? `<div class="card"><h2>Change first-run password</h2><form method="post" action="/admin/change-password">$${csrf}
+      <input type="password" name="password" minlength="12" placeholder="new password (12+ chars)"> <input type="password" name="confirm" minlength="12" placeholder="repeat">
+      <button>Change password</button></form></div>` : ''}
+
+      <div class="card"><form method="post" action="/logout">$${csrf}<button>Log out</button></form>
+      $${DASHBOARD_COOKIE_SECURE
+        ? '<p class="muted">Secure-cookie mode is enabled. Keep direct HTTP access blocked and use only your HTTPS reverse-proxy URL.</p>'
+        : '<p class="muted">This console uses HTTP on your LAN because that is your current setup. Do not expose port 5680 to the internet. Use HTTPS/Tailscale/reverse-proxy protection for untrusted networks.</p>'}</div>
+      </div></body></html>`;
+      }
+
+      function loginPage(error = '') {
+        return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Trading Login</title>
+      <style>body{font-family:system-ui;background:#101216;color:#eef2f7}.box{max-width:420px;margin:12vh auto;background:#171b22;padding:24px;border-radius:14px}input,button{box-sizing:border-box;width:100%;padding:12px;margin:8px 0;border-radius:8px}.bad{color:#ff9299}</style></head>
+      <body><div class="box"><h1>🤖 Jupiter Auto Trader</h1>$${error ? `<p class="bad">$${html(error)}</p>` : ''}
+      <p>Enter the admin password.</p>$${auth.mustChange ? '<p>The first-run password is printed once in the <b>trading-controller</b> container logs.</p>' : ''}
+      <form method="post" action="/login"><input type="password" name="password" autofocus><button>Log in</button></form></div></body></html>`;
+      }
+
+      async function recoveryPage(session, address, secret) {
+        return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Save Wallet Recovery</title>
+      <style>body{font-family:system-ui;background:#101216;color:#eef2f7}.box{max-width:850px;margin:40px auto;background:#171b22;padding:24px;border-radius:14px}.secret{font-family:monospace;word-break:break-all;background:#0b0d10;padding:14px;border-radius:8px}.warn{background:#3b2510;padding:14px;border-radius:8px}button{padding:12px;border:0;border-radius:8px;font-weight:bold}</style></head>
+      <body><div class="box"><h1>🔐 Save this recovery key now</h1>
+      <div class="warn"><b>This is shown once.</b> Store it in your password manager/offline backup. Never post it in n8n, Discord, GitHub or chat.<br><br><b>Security:</b> your current console uses HTTP on a trusted LAN. Do not create/view recovery keys over an untrusted network; use HTTPS/Tailscale before sharing this deployment remotely.</div>
+      <p><b>Wallet address</b></p><div class="secret">$${html(address)}</div>
+      <p><b>Solana private/recovery key (Base58)</b></p><div class="secret">$${html(secret)}</div>
+      <p>Gateway has already imported the wallet and encrypted its stored copy. Trading Mode stays blocked until you confirm the backup.</p>
+      <form method="post" action="/admin/wallet/backup-confirm">$${formHidden(session)}
+      <input type="hidden" name="address" value="$${html(address)}"><input name="confirm" placeholder="type I SAVED IT">
+      <button>I saved the recovery key</button></form>
+      <p><a href="/">Back without confirming</a></p></div></body></html>`;
+      }
+
+
+      async function gatewayDiagnosticsPage(session) {
+        const csrf=formHidden(session);
+        const checks=[];
+        async function run(label,fn) {
+          try { const value=await fn(); checks.push({label,ok:true,value}); }
+          catch(e){ checks.push({label,ok:false,value:{error:e.message||String(e)}}); }
+        }
+        await run('Gateway health',()=>gateway('/'));
+        await run('Solana status',async()=>{
+          const s=await gateway(`/chains/solana/status?network=$${encodeURIComponent(NETWORK)}`);
+          return {...s,rpcUrl:redactRpcUrl(s?.rpcUrl||'')};
+        });
+        await run('Wallets',()=>getWallets());
+        await run('OpenAPI compatibility',async()=>{
+          const docs=await gateway('/docs/json');
+          const c=requiredApiPathsPresent(docs);
+          return {version:docs?.info?.version||null,compatible:c.ok,missing:c.missing};
+        });
+        await run('Sample Jupiter quote',()=>gateway(`/connectors/jupiter/router/quote-swap?network=$${encodeURIComponent(NETWORK)}&baseToken=SOL&quoteToken=USDC&amount=0.001&side=SELL&slippagePct=$${encodeURIComponent(state.slippagePct)}`));
+        const blocks=checks.map(c=>`<div class="diag $${c.ok?'ok':'fail'}"><h3>$${c.ok?'✅':'❌'} $${html(c.label)}</h3><pre>$${html(JSON.stringify(c.value,null,2))}</pre></div>`).join('');
+        return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gateway Diagnostics</title>
+      <style>body{font-family:system-ui;background:#0f1217;color:#edf2f7}.wrap{max-width:1050px;margin:30px auto;padding:0 16px}.diag{padding:14px;margin:12px 0;border-radius:12px;background:#171b22;border:1px solid #303846}.ok{border-color:#285e38}.fail{border-color:#7d3034}pre{white-space:pre-wrap;word-break:break-word;background:#0b0e12;padding:12px;border-radius:8px}a{color:#9dcbff}</style></head>
+      <body><div class="wrap"><h1>🛠 Gateway Diagnostics</h1><p><a href="/">← Dashboard</a> &nbsp; <a href="/machine.json">Machine JSON</a></p>
+      <p>This page runs only safe read-only health/status/list/quote checks. There is deliberately no arbitrary Gateway command console.</p>$${blocks}
+      <form method="post" action="/admin/readiness">$${csrf}<button>Run full Quick Test Everything</button></form></div></body></html>`;
+      }
+
+      const admin = http.createServer(async (req, res) => {
+        try {
+          const u = new URL(req.url, `http://$${req.headers.host || 'localhost'}`);
+          if (u.pathname === '/healthz') return send(res, 200, JSON.stringify({ok:true}), 'application/json');
+          if (u.pathname === '/login' && req.method === 'GET') return send(res, 200, loginPage());
+          if (u.pathname === '/login' && req.method === 'POST') {
+            const ls=loginStatus(req);
+            if (ls.blocked) return send(res,429,loginPage(`Too many failed attempts. Try again in $${ls.retryAfter}s.`));
+            const f = parseForm(await readBody(req));
+            if (!verifyPassword(String(f.password || ''))) {
+              recordLoginFailure(req);
+              return send(res, 401, loginPage('Incorrect password'));
+            }
+            recordLoginSuccess(req);
+            const token = createSession();
+            return send(res, 303, '', 'text/plain', {
+              location: '/',
+              'set-cookie': sessionCookie(token,43200)
+            });
+          }
+
+          const session = requireAdmin(req, res);
+          if (!session) return;
+
+          if (u.pathname === '/machine.json' && req.method === 'GET') {
+            let app = null, wallets = null;
+            try { app = await getApp(); syncTokenControls(app); } catch {}
+            try { wallets = await getWallets(); } catch {}
+            return send(res, 200, JSON.stringify({
+              version:'10.2.2', state:safePublicState(), auth:{mustChange:auth.mustChange},
+              ntfy:{streamConnected,activeTopics,desiredTopics,lastTopicRefreshAt,lastForwardedAt,lastForwardedId,lastDecision,lastError},
+              app:{tokenCount:app?.tokens?.length || 0},
+              gateway:{wallets},
+              activeTradeLock,
+              triggerGuards,
+              recentTrades:trades.slice(-20),
+              recentAudit:audit.slice(-30),
+            }, null, 2), 'application/json');
+          }
+          if (u.pathname === '/' && req.method === 'GET') return send(res, 200, await dashboard(req, session));
+          if (u.pathname === '/gateway' && req.method === 'GET') return send(res, 200, await gatewayDiagnosticsPage(session));
+
+          if (req.method !== 'POST') return send(res, 404, 'Not found', 'text/plain');
+          const f = parseForm(await readBody(req));
+          if (!checkCsrf(f, session)) return send(res, 403, 'Invalid CSRF token', 'text/plain');
+
+          if (u.pathname === '/logout') {
+            return send(res, 303, '', 'text/plain', { location:'/login', 'set-cookie':sessionCookie('',0) });
+          }
+          if (u.pathname === '/admin/change-password') {
+            const p = String(f.password || '');
+            if (p.length < 12 || p !== String(f.confirm || '')) return send(res, 400, 'Password must be 12+ characters and match.', 'text/plain');
+            setPassword(p, false);
+            state.mode = 'testing'; state.master = false; saveState();
+            return send(res, 303, '', 'text/plain', { location:'/login', 'set-cookie':sessionCookie('',0) });
+          }
+          if (u.pathname === '/admin/controls') {
+            if(activeTradeLock) return send(res,409,'Cannot change coin controls/wallet assignments while a trade is in progress.','text/plain');
+            let app=await getApp();syncTokenControls(app);
+            const gatewayWallets=solanaWalletAddresses(await getWallets());
+            let changed=false;
+            for(const t of app.tokens||[]){
+              const prior=state.tokens[t.mint]||{autoBuy:false,autoSell:false,wallet:null};
+              const requestedWallet=String(f[`wallet_$${t.mint}`]||'').trim()||null;
+              if(requestedWallet && !gatewayWallets.includes(requestedWallet)) return send(res,400,`Assigned wallet for $${html(t.name)} is not present in Gateway.`,'text/plain');
+              const next={
+                autoBuy:Object.prototype.hasOwnProperty.call(f,`autoBuy_$${t.mint}`),
+                autoSell:Object.prototype.hasOwnProperty.call(f,`autoSell_$${t.mint}`),
+                wallet:requestedWallet
+              };
+              if(prior.autoBuy!==next.autoBuy||prior.autoSell!==next.autoSell||prior.wallet!==next.wallet)changed=true;
+              state.tokens[t.mint]=next;
+            }
+            if(changed){state.mode='testing';state.master=false;}
+            saveState();addAudit('CONTROLS_UPDATED',{forcedSafe:changed});
+            return redirect(res,'/');
+          }
+          if (u.pathname === '/admin/rpc/apply') {
+            if(state.mode!=='testing'||state.master||activeTradeLock)
+              return send(res,409,'RPC changes require TESTING mode, MASTER OFF, and no trade in progress.','text/plain');
+            const provider=String(f.rpcProvider||'').trim().toLowerCase();
+            if(!['public','helius','custom'].includes(provider))
+              return send(res,400,'Invalid RPC provider','text/plain');
+            const heliusApiKey=String(f.heliusApiKey||'').trim();
+            const customRpcUrl=String(f.customRpcUrl||'').trim();
+
+            const applied=await applyRpcProvider(provider,heliusApiKey,customRpcUrl);
+            state.mode='testing';state.master=false;saveState();
+            addAudit('RPC_PROVIDER_APPLIED',{provider,endpoint:applied?.endpoint||null});
+
+            // rpc-configurator writes the restart request only after its direct RPC preflight succeeds.
+            const live=await waitForGatewayRpc(provider,50000);
+            addAudit('RPC_PROVIDER_ACTIVE',{provider,rpcUrl:redactRpcUrl(live?.rpcUrl||'')});
+            state.lastReadiness=null;saveState();
+            return redirect(res,'/');
+          }
+          if (u.pathname === '/admin/safety') {
+            if(activeTradeLock) return send(res,409,'Cannot change safety settings while a trade is in progress.','text/plain');
+            const reserve=Number(f.minSolReserve),slip=Number(f.slippagePct),burst=Number(f.burstWindowSec);
+            const maxImpact=Number(f.maxPriceImpactPct),maxTrade=Number(f.maxTradeUSDC);
+            if(!Number.isFinite(reserve)||reserve<0||!Number.isFinite(slip)||slip<0||slip>10||
+               !Number.isFinite(maxImpact)||maxImpact<0.1||maxImpact>25||
+               !Number.isFinite(maxTrade)||maxTrade<1||maxTrade>1000000||
+               !Number.isFinite(burst)||burst<5||burst>300){
+              return send(res,400,'Invalid safety setting','text/plain');
+            }
+            const nextBurst=f.burstPolicy==='every-alert'?'every-alert':'collapse';
+            const changed=state.minSolReserve!==reserve||state.slippagePct!==slip||
+              state.maxPriceImpactPct!==maxImpact||state.maxTradeUSDC!==maxTrade||
+              state.burstPolicy!==nextBurst||state.burstWindowSec!==Math.floor(burst);
+            state.minSolReserve=reserve;state.slippagePct=slip;state.maxPriceImpactPct=maxImpact;state.maxTradeUSDC=maxTrade;
+            state.burstPolicy=nextBurst;state.burstWindowSec=Math.floor(burst);
+            if(changed){state.mode='testing';state.master=false;}
+            saveState();addAudit('SAFETY_SETTINGS_UPDATED',{forcedSafe:changed,maxImpact,maxTrade});
+            return redirect(res,'/');
+          }
+          if (u.pathname === '/admin/master') {
+            const desired = f.value === 'on';
+            if (desired && state.mode === 'trading') {
+              const r = await readiness();
+              if (!r.tradingOk) return send(res, 409, 'Trading readiness is not green. Run Quick Test Everything and fix failures first.', 'text/plain');
+            }
+            state.master = desired; saveState(); addAudit('MASTER_CHANGED', {value:desired});
+            return redirect(res, '/');
+          }
+          if (u.pathname === '/admin/mode') {
+            if (f.mode === 'testing') {
+              state.mode = 'testing'; state.master = false; saveState(); addAudit('MODE_CHANGED',{mode:'testing'});
+              return redirect(res, '/');
+            }
+            if (f.mode === 'trading') {
+              if (String(f.confirm || '').trim() !== 'ENABLE TRADING') return send(res, 400, 'Type ENABLE TRADING exactly.', 'text/plain');
+              const r = await readiness();
+              if (!r.tradingOk) return send(res, 409, 'Not ready for Trading Mode. Run Quick Test Everything and fix every red trading check.', 'text/plain');
+              state.mode = 'trading'; state.master = false; saveState(); addAudit('MODE_CHANGED',{mode:'trading'});
+              return redirect(res, '/');
+            }
+          }
+          if (u.pathname === '/admin/readiness') {
+            await readiness(); return redirect(res, '/');
+          }
+          if (u.pathname === '/admin/wallet/create') {
+            if (state.mode !== 'testing' || state.master || activeTradeLock) return send(res, 409, 'Wallet creation requires TESTING mode, MASTER OFF, and no trade in progress.', 'text/plain');
+            const nickname=cleanNickname(f.nickname);
+            const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+            const jwk = privateKey.export({ format:'jwk' });
+            if (!jwk.d || !jwk.x) throw new Error('Node failed to export Ed25519 key material');
+            const seed = b64urlDecode(jwk.d), pub = b64urlDecode(jwk.x);
+            if (seed.length !== 32 || pub.length !== 32) throw new Error('Unexpected Ed25519 key length');
+            const secret58 = base58Encode(Buffer.concat([seed, pub]));
+            const expectedAddress = base58Encode(pub);
+            const added = await gateway('/wallet/add', {
+              method:'POST', headers:{'content-type':'application/json'},
+              body:JSON.stringify({chain:'solana',privateKey:secret58,setDefault:true})
+            }, 20000);
+            if (!added?.address || added.address !== expectedAddress) throw new Error('Gateway wallet address did not match generated public key');
+            state.selectedWallet = added.address;
+            state.walletBackups[added.address] = false;
+            state.walletMeta[added.address] = {nickname,createdAt:nowIso()};
+            state.mode = 'testing'; state.master = false; saveState();
+            pendingRecovery.set(added.address, {secret:secret58, expires:Date.now()+15*60*1000});
+            addAudit('WALLET_CREATED',{address:added.address,nickname});
+            return send(res, 200, await recoveryPage(session, added.address, secret58));
+          }
+          if (u.pathname === '/admin/wallet/backup-confirm') {
+            const address = String(f.address || '');
+            const p = pendingRecovery.get(address);
+            if (!p || p.expires < Date.now()) return send(res, 410, 'Recovery display expired. Do not enable trading until you have a valid recovery backup.', 'text/plain');
+            if (String(f.confirm || '').trim() !== 'I SAVED IT') return send(res, 400, 'Type I SAVED IT exactly.', 'text/plain');
+            state.walletBackups[address] = true; pendingRecovery.delete(address); saveState();
+            addAudit('WALLET_BACKUP_CONFIRMED',{address}); return redirect(res, '/');
+          }
+          if (u.pathname === '/admin/wallet/select') {
+            if (activeTradeLock) return send(res,409,'Cannot switch wallets while a trade is in progress.','text/plain');
+            const address = String(f.address || '');
+            const wallets = solanaWalletAddresses(await getWallets());
+            if (!wallets.includes(address)) return send(res, 400, 'Wallet not found in Gateway.', 'text/plain');
+            await gateway('/wallet/setDefault', {
+              method:'POST', headers:{'content-type':'application/json'},
+              body:JSON.stringify({chain:'solana',address})
+            }, 10000);
+            ensureWalletMeta(address);
+            state.selectedWallet = address; state.mode='testing'; state.master=false; saveState();
+            addAudit('WALLET_SELECTED',{address,nickname:walletLabel(address)}); return redirect(res, '/');
+          }
+          if (u.pathname === '/admin/wallet/rename') {
+            const address=String(f.address||'');
+            const wallets=solanaWalletAddresses(await getWallets());
+            if(!wallets.includes(address)) return send(res,400,'Wallet not found in Gateway.','text/plain');
+            const nickname=cleanNickname(f.nickname);
+            const meta=ensureWalletMeta(address);
+            meta.nickname=nickname;
+            if(!meta.createdAt) meta.createdAt=nowIso();
+            saveState(); addAudit('WALLET_RENAMED',{address,nickname});
+            return redirect(res,'/#wallets');
+          }
+          if (u.pathname === '/admin/wallet/mark-backed-up') {
+            if (!state.selectedWallet) return send(res,400,'No wallet selected','text/plain');
+            if (String(f.confirm || '').trim() !== 'I HAVE THE KEY') return send(res,400,'Type I HAVE THE KEY exactly.','text/plain');
+            state.walletBackups[state.selectedWallet] = true; saveState();
+            addAudit('WALLET_BACKUP_MARKED',{address:state.selectedWallet}); return redirect(res,'/');
+          }
+          if (u.pathname === '/admin/guards/reset') {
+            if (state.mode !== 'testing' || state.master || activeTradeLock) return send(res,409,'Resetting trigger guards requires TESTING mode, MASTER OFF, and no active trade.','text/plain');
+            if (String(f.confirm || '').trim() !== 'RESET TRIGGER GUARDS') return send(res,400,'Type RESET TRIGGER GUARDS exactly.','text/plain');
+            const count=Object.keys(triggerGuards).length;
+            triggerGuards={}; saveTriggerGuards();
+            addAudit('TRIGGER_GUARDS_RESET',{count});
+            return redirect(res,'/');
+          }
+          if (u.pathname === '/admin/ntfy/policy') {
+            if(activeTradeLock) return send(res,409,'Cannot change ntfy topic policy while a trade is in progress.','text/plain');
+            const next=Object.prototype.hasOwnProperty.call(f,'requirePrivateTradingTopic');
+            const changed=state.requirePrivateTradingTopic!==next;
+            state.requirePrivateTradingTopic=next;
+            if(changed){state.mode='testing';state.master=false;}
+            saveState();addAudit('TRADING_NTFY_POLICY_CHANGED',{requirePrivateTradingTopic:next,forcedSafe:changed});
+            return redirect(res,'/');
+          }
+          if (u.pathname === '/admin/ntfy/rotate') {
+            if(state.mode!=='testing'||state.master||activeTradeLock)
+              return send(res,409,'Topic rotation requires TESTING mode, MASTER OFF, and no trade in progress.','text/plain');
+            if(String(f.confirm||'').trim()!=='ROTATE TRADING TOPIC')
+              return send(res,400,'Type ROTATE TRADING TOPIC exactly.','text/plain');
+            state.tradingNtfyTopic=`trade-$${crypto.randomBytes(24).toString('base64url')}`;
+            saveState();addAudit('TRADING_NTFY_TOPIC_ROTATED');
+            return redirect(res,'/');
+          }
+          if (u.pathname === '/admin/clear-lock') {
+            if (String(f.confirm || '').trim() !== 'CLEAR SAFETY LOCK') return send(res,400,'Type CLEAR SAFETY LOCK exactly.','text/plain');
+            state.safetyLock=false; state.safetyReason=null; state.mode='testing'; state.master=false; activeTradeLock=null; saveState();
+            addAudit('SAFETY_LOCK_CLEARED'); return redirect(res,'/');
+          }
+          return send(res, 404, 'Not found', 'text/plain');
+        } catch (e) {
+          console.error('[admin]', e);
+          send(res, 500, `<h1>Error</h1><pre>$${html(e.message || e)}</pre>`);
+        }
+      });
+
+      function safePublicState() {
+        return {
+          version:'10.2.2-portable-storage', mode:state.mode, master:state.master,
+          tokens:state.tokens, selectedWallet:state.selectedWallet,
+          selectedWalletNickname:state.selectedWallet ? walletLabel(state.selectedWallet) : null,
+          walletBackupConfirmed:!!state.selectedWallet && state.walletBackups[state.selectedWallet]===true,
+          minSolReserve:state.minSolReserve, slippagePct:state.slippagePct,
+          maxPriceImpactPct:state.maxPriceImpactPct,maxTradeUSDC:state.maxTradeUSDC,
+          requirePrivateTradingTopic:state.requirePrivateTradingTopic,
+          burstPolicy:state.burstPolicy, burstWindowSec:state.burstWindowSec,
+          safetyLock:state.safetyLock, safetyReason:state.safetyReason,
+          updatedAt:state.updatedAt,
+        };
+      }
+      async function internalJson(req, res, fn) {
+        try { return await fn(); } catch (e) {
+          console.error('[internal]', e);
+          return send(res, 500, JSON.stringify({ok:false,error:e.message || String(e)}), 'application/json');
+        }
+      }
+      function cleanOldHandoffs() {
+        const now = Date.now();
+        for (const [k,v] of pendingHandoffs) if (v.expires < now) pendingHandoffs.delete(k);
+        for (const [k,v] of claimedHandoffs) if (v.expires < now) claimedHandoffs.delete(k);
+      }
+      async function executeTrade(body) {
+        const alertId = String(body.alertId || '');
+        const claimed = claimedHandoffs.get(alertId);
+        if (!claimed || claimed.expires < Date.now()) throw new Error('Alert handoff is not active/claimed');
+        if (trades.some(t => t.alertId === alertId)) return trades.find(t => t.alertId === alertId);
+
+        if (state.mode !== 'trading') throw new Error('System is not in TRADING mode');
+        if (!state.master) throw new Error('MASTER AUTO TRADING is OFF');
+        if (state.safetyLock) throw new Error(`Safety lock active: $${state.safetyReason || 'locked'}`);
+
+        const direction = body.direction === 'BUY' ? 'BUY' : body.direction === 'SELL' ? 'SELL' : null;
+        const mint = String(body.mint || '');
+        const target = Number(body.target);
+        const usdAmount = Number(body.usdAmount);
+        const tokenAmount = Number(body.tokenAmount || 0);
+        const alertTopic=String(body.topic||'');
+        const q = body.quote || {};
+        if (!direction || !isMint(mint) || !(target > 0) || !(usdAmount > 0) || !q.quoteId) throw new Error('Invalid trade request');
+
+        const app = await getApp(); syncTokenControls(app);
+        const token = (app.tokens || []).find(t => t.mint === mint);
+        if (!token || token.enabled !== true) throw new Error('Token is no longer enabled in app');
+        const liveTopic=currentEffectiveTopic(app,mint);
+        if(!liveTopic || alertTopic!==liveTopic)
+          throw new Error('Alert ntfy topic no longer matches this token\'s current effective topic');
+        if(state.requirePrivateTradingTopic && liveTopic!==state.tradingNtfyTopic)
+          throw new Error('Private Trading Topic is required but this token is not using the controller-generated topic');
+        const c=state.tokens[mint]||{autoBuy:false,autoSell:false,wallet:null};
+        const tradeWallet=c.wallet||null;
+        const requestedWallet=String(body.assignedWallet||'')||null;
+        if(!tradeWallet)throw new Error(`$${token.name} has no trading wallet assigned`);
+        if(requestedWallet!==tradeWallet)throw new Error(`$${token.name} trading wallet assignment changed during validation`);
+        if (direction === 'BUY' && !c.autoBuy) throw new Error(`$${token.name} AUTO BUY is OFF`);
+        if (direction === 'SELL' && !c.autoSell) throw new Error(`$${token.name} AUTO SELL is OFF`);
+        const list = direction === 'BUY' ? token.buy_alerts || [] : token.sell_alerts || [];
+        if (!list.some(v => approx(v, target))) throw new Error('Fired target is no longer configured');
+        if (!approx(token.usd_amount, usdAmount)) throw new Error('USDC scenario changed');
+        if (!(usdAmount > 0) || usdAmount > Number(state.maxTradeUSDC))
+          throw new Error(`Trade scenario $${usdAmount} USDC exceeds safety cap $${state.maxTradeUSDC} USDC`);
+
+        const guard=guardStatus(token,direction,target);
+        if (guard.blocked) {
+          return {
+            at:nowIso(),alertId,name:token.name,mint,direction,status:'TRIGGER_GUARD_SUPPRESSED',
+            reason:`This exact $${direction} threshold was already used for a real trade and is still guarded`,
+            guardedAt:guard.row?.at||null,signature:null
+          };
+        }
+
+        const wallets=solanaWalletAddresses(await getWallets());
+        if(!wallets.includes(tradeWallet))throw new Error(`$${token.name} assigned trading wallet is no longer present in Gateway`);
+        if(state.walletBackups[tradeWallet]!==true)throw new Error(`$${token.name} assigned wallet recovery is not confirmed`);
+
+        const expectedIn = direction === 'BUY' ? USDC_MINT : mint;
+        const expectedOut = direction === 'BUY' ? mint : USDC_MINT;
+        if (String(q.tokenIn) !== expectedIn || String(q.tokenOut) !== expectedOut) throw new Error('Final quote token direction mismatch');
+        const amountIn = Number(q.amountIn), amountOut = Number(q.amountOut);
+        if (!(amountIn > 0) || !(amountOut > 0)) throw new Error('Invalid final quote amounts');
+        const finalImpactPercent=priceImpactPercent(q.priceImpactPct);
+        if(finalImpactPercent===null || finalImpactPercent>Number(state.maxPriceImpactPct))
+          throw new Error(`Final quote price impact $${finalImpactPercent===null?'invalid':finalImpactPercent.toFixed(2)+'%'} exceeds cap $${state.maxPriceImpactPct}%`);
+        const effective = direction === 'BUY' ? amountIn / amountOut : amountOut / amountIn;
+        if (direction === 'BUY' && effective > target) throw new Error('Final BUY quote no longer meets target');
+        if (direction === 'SELL' && effective < target) throw new Error('Final SELL quote no longer meets target');
+        if (direction === 'BUY' && !approx(amountIn, usdAmount, 1e-6, 1e-8)) throw new Error('Final BUY quote amount differs from configured USDC scenario');
+        if (direction === 'SELL' && (!(tokenAmount > 0) || !approx(amountIn, tokenAmount, 1e-6, 1e-8))) throw new Error('Final SELL quote amount differs from validated token amount');
+
+        const bal=await getBalancesNormalized(tradeWallet,mint,token.name);
+        if (Number(bal.sol) < Number(state.minSolReserve)) throw new Error(`SOL reserve too low ($${bal.sol} < $${state.minSolReserve})`);
+        if (direction === 'BUY' && Number(bal.usdc) + 1e-9 < amountIn) throw new Error(`Insufficient USDC ($${bal.usdc} < $${amountIn})`);
+        if (direction === 'SELL' && Number(bal.token) + 1e-9 < amountIn) throw new Error(`Insufficient $${token.name} ($${bal.token} < $${amountIn})`);
+
+        if (state.burstPolicy === 'collapse') {
+          const cutoff = Date.now() - state.burstWindowSec * 1000;
+          const recent = trades.find(t => t.mint === mint && t.direction === direction &&
+            new Date(t.at || t.updatedAt || 0).getTime() >= cutoff &&
+            ['SUBMITTING','PENDING','CONFIRMED','UNCERTAIN'].includes(t.status));
+          if (recent) {
+            return {
+              at:nowIso(), alertId, name:token.name, mint, direction,
+              status:'BURST_SUPPRESSED', reason:`Another $${direction} trade for this token was already attempted within $${state.burstWindowSec}s`,
+              signature:null
+            };
+          }
+        }
+        if (activeTradeLock) throw new Error(`Global trade lock held by $${activeTradeLock.alertId}`);
+
+        activeTradeLock = { alertId, mint, direction, since:nowIso() };
+        const rec = {
+          at:nowIso(), updatedAt:nowIso(), alertId, name:token.name, mint, direction,
+          target, usdAmount, tokenAmount:direction==='SELL'?amountIn:null,
+          effectivePrice:effective, wallet:tradeWallet, walletNickname:walletLabel(tradeWallet),
+          priceImpactPercent:finalImpactPercent,maxPriceImpactPct:state.maxPriceImpactPct,
+          quoteId:q.quoteId, status:'SUBMITTING', signature:null
+        };
+        boundedPush(trades, rec, MAX_TRADES); saveTrades();
+        triggerGuards[triggerGuardKey(mint,direction,target)]={at:nowIso(),alertId,mint,direction,target,resetMinutes:Number(token.alert_reset_minutes??0)};
+        saveTriggerGuards();
+        addAudit('TRADE_SUBMITTING',{alertId,mint,direction,target});
+
+        try {
+          const result = await gateway('/connectors/jupiter/router/execute-quote', {
+            method:'POST', headers:{'content-type':'application/json'},
+            body:JSON.stringify({walletAddress:tradeWallet,network:NETWORK,quoteId:q.quoteId})
+          }, 90000);
+
+          rec.updatedAt=nowIso(); rec.signature=result?.signature || null; rec.gatewayStatus=result?.status;
+          rec.data=result?.data || null;
+          if (Number(result?.status) === 1) {
+            rec.status='CONFIRMED'; activeTradeLock=null; saveTrades();
+            addAudit('TRADE_CONFIRMED',{alertId,signature:rec.signature});
+            return rec;
+          }
+          if (Number(result?.status) === -1) {
+            rec.status='FAILED'; activeTradeLock=null; saveTrades();
+            addAudit('TRADE_FAILED',{alertId,signature:rec.signature});
+            return rec;
+          }
+
+          if (rec.signature) {
+            rec.status='PENDING'; saveTrades();
+            for (let i=0;i<6;i++) {
+              await sleep(5000);
+              const poll = await gateway('/chains/solana/poll', {
+                method:'POST', headers:{'content-type':'application/json'},
+                body:JSON.stringify({network:NETWORK,signature:rec.signature})
+              }, 15000);
+              if (Number(poll?.txStatus) === 1) {
+                rec.status='CONFIRMED'; rec.poll=poll; rec.updatedAt=nowIso(); activeTradeLock=null; saveTrades();
+                addAudit('TRADE_CONFIRMED_AFTER_POLL',{alertId,signature:rec.signature}); return rec;
+              }
+              if (Number(poll?.txStatus) === -1) {
+                rec.status='FAILED'; rec.poll=poll; rec.updatedAt=nowIso(); activeTradeLock=null; saveTrades();
+                addAudit('TRADE_FAILED_AFTER_POLL',{alertId,signature:rec.signature}); return rec;
+              }
+            }
+          }
+
+          rec.status='UNCERTAIN'; rec.updatedAt=nowIso(); saveTrades();
+          state.safetyLock=true; state.safetyReason=`Transaction result uncertain for alert $${alertId}$${rec.signature ? ` / $${rec.signature}` : ''}`;
+          state.master=false; saveState();
+          addAudit('TRADE_UNCERTAIN',{alertId,signature:rec.signature});
+          return rec;
+        } catch (e) {
+          rec.status='UNCERTAIN'; rec.error=e.message || String(e); rec.updatedAt=nowIso(); saveTrades();
+          state.safetyLock=true; state.safetyReason=`Execution request became uncertain for alert $${alertId}. Do not retry automatically.`;
+          state.master=false; saveState();
+          addAudit('TRADE_EXECUTION_ERROR_UNCERTAIN',{alertId,error:rec.error});
+          return rec;
+        }
+      }
+
+      const internal = http.createServer(async (req,res) => internalJson(req,res,async()=>{
+        const u = new URL(req.url, 'http://internal');
+        if (req.method==='GET' && u.pathname==='/healthz') return send(res,200,JSON.stringify({ok:true}),'application/json');
+        if (req.method==='GET' && u.pathname==='/internal/source-state') {
+          const app=await getApp();
+          return send(res,200,JSON.stringify(app),'application/json');
+        }
+        if (req.method==='GET' && u.pathname==='/internal/state') {
+          cleanOldHandoffs();
+          return send(res,200,JSON.stringify({ok:true,state:safePublicState(),listener:{streamConnected,activeTopics,lastDecision,lastForwardedAt}}),'application/json');
+        }
+        if (req.method==='POST' && u.pathname==='/internal/claim') {
+          const b=JSON.parse(await readBody(req) || '{}'); cleanOldHandoffs();
+          const p=pendingHandoffs.get(String(b.id||''));
+          const ok=!!p && p.token===String(b.handoff||'') && p.expires>=Date.now();
+          if(ok){pendingHandoffs.delete(String(b.id));claimedHandoffs.set(String(b.id),{expires:Date.now()+10*60*1000});}
+          return send(res,200,JSON.stringify({ok,claimed:ok}),'application/json');
+        }
+        if(req.method==='POST'&&u.pathname==='/internal/balances'){
+          const b=JSON.parse(await readBody(req)||'{}');
+          const mint=String(b.mint||''),name=String(b.name||'');
+          const assignedWallet=state.tokens?.[mint]?.wallet||null;
+          if(!assignedWallet)return send(res,200,JSON.stringify({assigned:false,configured:false,wallet:null,walletNickname:null,backupConfirmed:false,sol:null,usdc:null,token:null,raw:{},minSolReserve:state.minSolReserve}),'application/json');
+          const wallets=solanaWalletAddresses(await getWallets());
+          if(!wallets.includes(assignedWallet))return send(res,200,JSON.stringify({assigned:true,configured:false,wallet:assignedWallet,walletNickname:walletLabel(assignedWallet),backupConfirmed:state.walletBackups[assignedWallet]===true,error:'assigned wallet is not present in Gateway',sol:null,usdc:null,token:null,raw:{},minSolReserve:state.minSolReserve}),'application/json');
+          const result=await getBalancesNormalized(assignedWallet,mint,name);
+          return send(res,200,JSON.stringify({...result,assigned:true,walletNickname:walletLabel(assignedWallet),backupConfirmed:state.walletBackups[assignedWallet]===true,minSolReserve:state.minSolReserve}),'application/json');
+        }
+        if (req.method==='POST' && u.pathname==='/internal/trade/execute') {
+          const b=JSON.parse(await readBody(req) || '{}');
+          const result=await executeTrade(b);
+          return send(res,200,JSON.stringify({ok:true,trade:result}),'application/json');
+        }
+        return send(res,404,JSON.stringify({ok:false,error:'not found'}),'application/json');
+      }));
+
+      function remember(id) {
+        if (!id || seen.has(id)) return false;
+        seen.add(id); seenList.push(id);
+        if (seenList.length > MAX_SEEN) {
+          const removed=seenList.splice(0,seenList.length-MAX_SEEN);
+          for(const x of removed) seen.delete(x);
+        }
+        atomicJson(SEEN_FILE,seenList); return true;
+      }
+      async function listGatewayTokens(search=''){
+        const qs=new URLSearchParams({chain:'solana',network:NETWORK});
+        if(search)qs.set('search',search);
+        const r=await gateway(`/tokens?$${qs.toString()}`,{},10000);
+        return Array.isArray(r?.tokens)?r.tokens:[];
+      }
+      function gatewayInternalSymbol(mint){
+        return `AUTO_$${mint.slice(0,8)}_$${mint.slice(-6)}`.toUpperCase();
+      }
+      async function ensureGatewayToken(appToken){
+        const mint=String(appToken?.mint||'').trim();
+        if(!isMint(mint))return {ok:false,mint,error:'invalid Solana mint'};
+        if(gatewayTokenReadyMints.has(mint))return {ok:true,mint,cached:true};
+
+        const existing=await listGatewayTokens(mint);
+        const exact=existing.find(t=>String(t?.address||'')===mint);
+        if(exact){gatewayTokenReadyMints.add(mint);return {ok:true,mint,token:exact,existing:true};}
+
+        let discovered;
+        try{
+          discovered=await gateway(`/tokens/find/$${encodeURIComponent(mint)}?chainNetwork=$${encodeURIComponent(`solana-$${NETWORK}`)}`,{},15000);
+        }catch(e){
+          return {ok:false,mint,error:`Gateway token metadata lookup failed: $${e.message||e}`};
+        }
+        const decimals=Number(discovered?.decimals);
+        if(!Number.isInteger(decimals)||decimals<0||decimals>255)return {ok:false,mint,error:'Gateway returned invalid token decimals'};
+
+        const token={
+          chainId:Number.isFinite(Number(discovered?.chainId))?Number(discovered.chainId):101,
+          name:String(discovered?.name||appToken?.name||`Token $${mint.slice(0,8)}`).trim(),
+          // Never key auto-managed tokens by a public ticker: duplicate meme-token symbols are common.
+          symbol:gatewayInternalSymbol(mint),
+          address:mint,
+          decimals
+        };
+
+        try{
+          await gateway('/tokens',{
+            method:'POST',headers:{'content-type':'application/json'},
+            body:JSON.stringify({chain:'solana',network:NETWORK,token})
+          },15000);
+        }catch(e){
+          const after=await listGatewayTokens(mint).catch(()=>[]);
+          if(!after.some(t=>String(t?.address||'')===mint))
+            return {ok:false,mint,error:`Gateway token save failed: $${e.message||e}`};
+        }
+
+        const verify=await listGatewayTokens(mint);
+        const saved=verify.find(t=>String(t?.address||'')===mint);
+        if(!saved)return {ok:false,mint,error:'Gateway token save did not verify by exact mint'};
+        gatewayTokenReadyMints.add(mint);
+        addAudit('GATEWAY_TOKEN_AUTO_ADDED',{mint,appName:String(appToken?.name||''),gatewaySymbol:saved.symbol,decimals:saved.decimals});
+        console.log('[gateway-token] auto-added',mint,saved.symbol,'decimals',saved.decimals);
+        return {ok:true,mint,token:saved,added:true};
+      }
+      async function ensureGatewayTokensForApp(app){
+        const enabled=(Array.isArray(app?.tokens)?app.tokens:[]).filter(t=>t?.enabled===true&&isMint(t?.mint));
+        const results=[];
+        for(const t of enabled){
+          try{results.push({...await ensureGatewayToken(t),name:t.name});}
+          catch(e){results.push({ok:false,mint:t.mint,name:t.name,error:e.message||String(e)});}
+        }
+        return {ok:results.every(r=>r.ok),total:results.length,ready:results.filter(r=>r.ok).length,
+          failed:results.filter(r=>!r.ok),results};
+      }
+      async function prepareGatewayTokenForMessage(msg){
+        // A public ntfy message may only cause token registration after matching a mint and
+        // effective topic that are already present in Jupiter USDC Price Alerts.
+        const text=String(msg?.message||'');
+        const match=text.match(/^Token:\s*(.*?)\s+\(([1-9A-HJ-NP-Za-km-z]{32,44})\)\s*$$/m);
+        if(!match)return {ok:true,skipped:true};
+        const mint=String(match[2]);
+        const app=await getApp();syncTokenControls(app);
+        const token=(Array.isArray(app?.tokens)?app.tokens:[]).find(t=>t?.mint===mint);
+        if(!token)return {ok:true,skipped:true};
+        const sm=new Map((Array.isArray(app?.summaries)?app.summaries:[]).map(s=>[s.mint,s]));
+        const summary=sm.get(mint)||{};
+        const effectiveTopic=String(summary.ntfy_effective_topic||token.ntfy_topic||'');
+        if(!effectiveTopic||String(msg?.topic||'')!==effectiveTopic)return {ok:true,skipped:true};
+        return ensureGatewayToken(token);
+      }
+
+      async function getTopics() {
+        const data=await getApp(); syncTokenControls(data);
+        const tokenSync=await ensureGatewayTokensForApp(data);
+        if(!tokenSync.ok)console.warn('[gateway-token] sync incomplete:',tokenSync.failed.map(x=>`$${x.name||x.mint}: $${x.error}`).join(' | '));
+        const topics=[];
+        for(const t of data.tokens||[]){
+          if(t.enabled!==true||!t.mint) continue;
+          const topic=currentEffectiveTopic(data,t.mint).trim();
+          if(topic) topics.push(topic);
+        }
+        return [...new Set(topics)].sort();
+      }
+      function sameArray(a,b){return a.length===b.length&&a.every((v,i)=>v===b[i]);}
+      async function refreshTopicsLoop(){
+        for(;;){
+          try{
+            const next=await getTopics();lastTopicRefreshAt=nowIso();lastError=null;
+            if(!sameArray(next,desiredTopics)){desiredTopics=next;console.log('[ntfy] topics:',next.join(', ')||'(none)');if(streamController)streamController.abort();}
+          }catch(e){lastError=`topic refresh: $${e.message||e}`;console.error('[ntfy]',lastError);}
+          await sleep(TOPIC_REFRESH_MS);
+        }
+      }
+      async function forwardToN8n(msg){
+        const handoff=crypto.randomBytes(32).toString('hex');
+        pendingHandoffs.set(msg.id,{token:handoff,expires:Date.now()+5*60*1000});
+        let tokenPrep={ok:true,skipped:true};
+        try{tokenPrep=await prepareGatewayTokenForMessage(msg);}
+        catch(e){tokenPrep={ok:false,error:e.message||String(e)};}
+        const payload={...msg,_handoff:handoff,_gatewayTokenReady:tokenPrep.ok===true,
+          _gatewayTokenError:tokenPrep.ok===true?null:(tokenPrep.error||'Gateway token preparation failed'),
+          _tradingTopicReady:!state.requirePrivateTradingTopic || String(msg?.topic||'')===state.tradingNtfyTopic};
+        const t=timeoutSignal(120000);
+        let r;
+        try {
+          r=await fetch(N8N_WEBHOOK,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload),signal:t.signal});
+        } finally {
+          t.clear();
+        }
+        const text=await r.text();
+        if(!r.ok) throw new Error(`n8n HTTP $${r.status} $${text.slice(0,300)}`);
+        let result;try{result=JSON.parse(text)}catch{result={raw:text.slice(0,500)}}
+        lastForwardedAt=nowIso();lastForwardedId=msg.id;lastDecision=result?.decision||result?.trade?.status||result?.status||null;
+        addAudit('NTFY_DECISION',{id:msg.id,topic:msg.topic,title:msg.title||'',decision:lastDecision});
+        claimedHandoffs.delete(msg.id);pendingHandoffs.delete(msg.id);
+        console.log('[ntfy] decision',msg.id,msg.topic,msg.title||'','=>',lastDecision||'OK');
+      }
+      async function streamLoop(){
+        for(;;){
+          if(!desiredTopics.length){activeTopics=[];streamConnected=false;await sleep(1000);continue;}
+          const topics=[...desiredTopics], encoded=topics.map(encodeURIComponent).join(',');
+          const controller=new AbortController();streamController=controller;activeTopics=topics;
+          try{
+            const r=await fetch(`$${NTFY}/$${encoded}/json?since=$${encodeURIComponent(LOOKBACK)}`,{signal:controller.signal});
+            if(!r.ok)throw new Error(`ntfy HTTP $${r.status}`);
+            streamConnected=true;lastError=null;reconnectDelay=1000;
+            const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';
+            while(true){
+              const part=await reader.read();if(part.done)throw new Error('ntfy stream ended');
+              buffer+=decoder.decode(part.value,{stream:true});let idx;
+              while((idx=buffer.indexOf('\n'))>=0){
+                const line=buffer.slice(0,idx).trim();buffer=buffer.slice(idx+1);if(!line)continue;
+                let msg;try{msg=JSON.parse(line)}catch{continue}
+                if(msg.event!=='message'||!msg.id||seen.has(msg.id))continue;
+                addAudit('NTFY_RECEIVED',{id:msg.id,topic:msg.topic,title:msg.title||''});
+                try{
+                  await forwardToN8n(msg);
+                  // Mark only after n8n returns a terminal decision. If delivery fails, reconnect + replay safely.
+                  remember(msg.id);
+                }catch(e){
+                  lastError=`n8n handoff: $${e.message||e}`;
+                  addAudit('NTFY_PROCESSING_ERROR',{id:msg.id,error:lastError});
+                  console.error('[ntfy]',lastError);
+                  throw e;
+                }
+              }
+            }
+          }catch(e){
+            streamConnected=false;
+            reconnectDelay=e?.name==='AbortError'?500:Math.min(Math.max(2000,reconnectDelay*2),15000);
+            if(e?.name!=='AbortError'){lastError=`stream: $${e.message||e}`;console.error('[ntfy]',lastError);}
+          }finally{if(streamController===controller)streamController=null;}
+          await sleep(reconnectDelay);
+        }
+      }
+
+      admin.listen(ADMIN_PORT,'0.0.0.0',()=>console.log(`[trading-controller] admin UI listening on $${ADMIN_PORT}`));
+      internal.listen(INTERNAL_PORT,'0.0.0.0',()=>console.log(`[trading-controller] internal API listening on $${INTERNAL_PORT}`));
+      console.log('[source-api] using',APP_API);
+      refreshTopicsLoop();
+      streamLoop().catch(e=>{console.error('[ntfy] fatal',e);process.exit(1)});
+      setInterval(cleanOldHandoffs,60_000).unref();
+    ports:
+    - 5680:5680
+    environment:
+      APP_API_PORT: ${APP_API_PORT:-8000}
+      APP_API_URL: ${APP_API_URL:-}
+      DASHBOARD_COOKIE_SECURE: ${DASHBOARD_COOKIE_SECURE:-false}
+      N8N_ALERT_WEBHOOK: http://n8n:5678/webhook/jupiter-ntfy-event
+      N8N_HEALTH_URL: http://n8n:5678/healthz
+      GATEWAY_URL: http://gateway:15888
+      NTFY_SERVER: ${NTFY_SERVER:-https://ntfy.sh}
+      SOLANA_NETWORK: mainnet-beta
+      TOPIC_REFRESH_SECONDS: '15'
+      NTFY_LOOKBACK: 5m
+      TZ: ${TZ:-Europe/London}
+      RPC_CONFIGURATOR_URL: http://rpc-configurator:8081
+      RPC_CONTROL_DIR: /gateway-control
+    extra_hosts:
+    - host.docker.internal:host-gateway
+    volumes:
+    - type: volume
+      source: controller_data
+      target: /data
+      volume:
+        nocopy: true
+    - type: volume
+      source: gateway_control
+      target: /gateway-control
+      volume:
+        nocopy: true
+    depends_on:
+      n8n:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+      rpc-configurator:
+        condition: service_healthy
+      n8n-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - fetch('http://127.0.0.1:5680/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+    - trading_control
+  gateway-init:
+    image: hummingbot/gateway:version-2.15.1@sha256:674d441140f3becaeeb9ad0634cdc8c7b1b1268395b8dd9ee004bd63b15180f2
+    restart: 'no'
+    command:
+    - sh
+    - -c
+    - |
+      set -eu
+      CONF=/home/gateway/conf
+      ROOT="$$CONF/root.yml"
+
+      if [ ! -e "$$ROOT" ]; then
+        if [ -n "$$(find "$$CONF" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+          echo "[gateway-init] ERROR: configuration volume is non-empty but root.yml is missing; refusing to overwrite partial or restored data" >&2
+          exit 10
+        fi
+
+        echo "[gateway-init] initialising fresh Gateway configuration"
+        pnpm run setup:with-defaults
+      fi
+
+      for FILE in \
+        "$$CONF/root.yml" \
+        "$$CONF/server.yml" \
+        "$$CONF/apiKeys.yml" \
+        "$$CONF/chains/solana.yml" \
+        "$$CONF/chains/solana/mainnet-beta.yml"
+      do
+        if [ ! -s "$$FILE" ]; then
+          echo "[gateway-init] ERROR: required Gateway configuration is missing or empty: $$FILE" >&2
+          exit 11
+        fi
+      done
+
+      echo "[gateway-init] Gateway configuration is complete"
+    volumes:
+    - type: volume
+      source: gateway_conf
+      target: /home/gateway/conf
+      volume:
+        nocopy: true
+    network_mode: none
+  gateway:
+    image: hummingbot/gateway:version-2.15.1@sha256:674d441140f3becaeeb9ad0634cdc8c7b1b1268395b8dd9ee004bd63b15180f2
+    restart: unless-stopped
+    environment:
+      GATEWAY_PASSPHRASE: ${GATEWAY_PASSPHRASE:?GATEWAY_PASSPHRASE is required and must remain stable}
+      DEV: 'true'
+    volumes:
+    - type: volume
+      source: gateway_conf
+      target: /home/gateway/conf
+      volume:
+        nocopy: true
+    - type: volume
+      source: gateway_logs
+      target: /home/gateway/logs
+      volume:
+        nocopy: true
+    - type: volume
+      source: gateway_control
+      target: /gateway-control
+      volume:
+        nocopy: true
+    depends_on:
+      gateway-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - fetch('http://127.0.0.1:15888/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+    - trading_control
+    init: true
+    command:
+    - sh
+    - -c
+    - |
+      set -eu
+
+      child=""
+
+      stop_child() {
+        if [ -z "$$child" ]; then
+          return 0
+        fi
+
+        if kill -0 "$$child" 2>/dev/null; then
+          echo "[gateway-supervisor] stopping Gateway PID $$child"
+          kill -TERM "$$child" 2>/dev/null || true
+
+          i=0
+          while kill -0 "$$child" 2>/dev/null && [ "$$i" -lt 12 ]; do
+            sleep 1
+            i=$$((i + 1))
+          done
+
+          if kill -0 "$$child" 2>/dev/null; then
+            echo "[gateway-supervisor] Gateway did not stop after 12s; forcing stop"
+            kill -KILL "$$child" 2>/dev/null || true
+          fi
+
+          wait "$$child" 2>/dev/null || true
+        fi
+
+        child=""
+      }
+
+      trap 'stop_child; exit 0' TERM INT
+
+      while true; do
+        rm -f /gateway-control/restart.request
+
+        # Gateway v2.15.1 package start target is START_SERVER=true node dist/index.js.
+        # Track the real Node PID so RPC provider changes always create a fresh Solana instance.
+        START_SERVER=true node dist/index.js &
+        child=$$!
+        echo "[gateway-supervisor] Gateway started as PID $$child"
+
+        restart_requested=0
+
+        while kill -0 "$$child" 2>/dev/null; do
+          if [ -f /gateway-control/restart.request ]; then
+            echo "[gateway-supervisor] RPC/config restart requested"
+            rm -f /gateway-control/restart.request
+            restart_requested=1
+            stop_child
+            break
+          fi
+          sleep 1
+        done
+
+        if [ -n "$$child" ]; then
+          wait "$$child" 2>/dev/null || true
+          child=""
+        fi
+
+        if [ "$$restart_requested" -eq 1 ]; then
+          echo "[gateway-supervisor] restarting Gateway with fresh configuration"
+        else
+          echo "[gateway-supervisor] Gateway exited; restarting"
+        fi
+
+        sleep 2
+      done
+  rpc-configurator:
+    image: hummingbot/gateway:version-2.15.1@sha256:674d441140f3becaeeb9ad0634cdc8c7b1b1268395b8dd9ee004bd63b15180f2
+    restart: unless-stopped
+    init: true
+    entrypoint:
+    - node
+    - -e
+    command:
+    - |
+      const http=require('http');
+      const fs=require('fs');
+      const crypto=require('crypto');
+      const yaml=require('js-yaml');
+      const {URL}=require('url');
+
+      const PORT=8081;
+      const CONF='/gateway-conf';
+      const CONTROL='/gateway-control';
+      const TOKEN_FILE=`$${CONTROL}/rpc-config-token`;
+      const PUBLIC_RPC='https://api.mainnet-beta.solana.com';
+      const API_KEYS=`$${CONF}/apiKeys.yml`;
+      const SOLANA_CHAIN=`$${CONF}/chains/solana.yml`;
+      const SOLANA_MAINNET=`$${CONF}/chains/solana/mainnet-beta.yml`;
+
+      fs.mkdirSync(CONTROL,{recursive:true});
+      if(!fs.existsSync(TOKEN_FILE)){
+        fs.writeFileSync(TOKEN_FILE,crypto.randomBytes(32).toString('hex'),{mode:0o600});
+      }
+      const accessToken=fs.readFileSync(TOKEN_FILE,'utf8').trim();
+
+      function readYaml(path){
+        try{return yaml.load(fs.readFileSync(path,'utf8'))||{};}catch(e){throw new Error(`Cannot read $${path}: $${e.message}`);}
+      }
+      function atomicYaml(path,value){
+        const tmp=`$${path}.rpc-tmp`;
+        fs.writeFileSync(tmp,yaml.dump(value,{lineWidth:120,noRefs:true}),{mode:0o600});
+        fs.renameSync(tmp,path);
+      }
+      function send(res,code,obj){
+        res.writeHead(code,{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff'});
+        res.end(JSON.stringify(obj));
+      }
+      function authorised(req){
+        const h=String(req.headers.authorization||'');
+        const expected=`Bearer $${accessToken}`;
+        if(h.length!==expected.length)return false;
+        try{return crypto.timingSafeEqual(Buffer.from(h),Buffer.from(expected));}catch{return false;}
+      }
+      async function body(req,max=64*1024){
+        let s='';
+        for await(const c of req){s+=c;if(s.length>max)throw new Error('request too large');}
+        return s?JSON.parse(s):{};
+      }
+      function redactUrl(raw){
+        try{
+          const u=new URL(String(raw||''));
+          if(u.username)u.username='***';
+          if(u.password)u.password='***';
+          if([...u.searchParams.keys()].length){
+            for(const k of [...u.searchParams.keys()])u.searchParams.set(k,'***');
+          }
+          return u.toString();
+        }catch{return raw?'configured':'—';}
+      }
+      function validateRpcUrl(raw){
+        const u=new URL(String(raw||'').trim());
+        if(!['http:','https:'].includes(u.protocol))throw new Error('RPC URL must use http:// or https://');
+        if(!u.hostname)throw new Error('RPC URL hostname is missing');
+        return u.toString();
+      }
+      async function testSolanaRpc(url){
+        const c=new AbortController();
+        const timer=setTimeout(()=>c.abort(),12000);
+        try{
+          const r=await fetch(url,{
+            method:'POST',
+            headers:{'content-type':'application/json'},
+            body:JSON.stringify({jsonrpc:'2.0',id:1,method:'getLatestBlockhash',params:[{commitment:'confirmed'}]}),
+            signal:c.signal
+          });
+          const j=await r.json().catch(()=>null);
+          if(!r.ok)throw new Error(`RPC HTTP $${r.status}`);
+          const blockhash=j?.result?.value?.blockhash;
+          const slot=Number(j?.result?.context?.slot);
+          if(!blockhash||!Number.isFinite(slot))throw new Error(j?.error?.message||'RPC did not return a valid mainnet-style blockhash response');
+          return {slot};
+        }finally{clearTimeout(timer);}
+      }
+      function currentStatus(){
+        const keys=readYaml(API_KEYS);
+        const sol=readYaml(SOLANA_CHAIN);
+        const net=readYaml(SOLANA_MAINNET);
+        const configuredProvider=String(sol.rpcProvider||'url');
+        const nodeURL=String(net.nodeURL||PUBLIC_RPC);
+        let provider='custom';
+        if(configuredProvider==='helius')provider='helius';
+        else if(nodeURL.replace(/\/+$$/,'')===PUBLIC_RPC)provider='public';
+        return {
+          provider,
+          configuredProvider,
+          nodeURLRedacted:redactUrl(nodeURL),
+          heliusKeyConfigured:typeof keys.helius==='string'&&keys.helius.trim().length>0
+        };
+      }
+      async function applyRpc(input){
+        const provider=String(input.provider||'').trim().toLowerCase();
+        if(!['public','helius','custom'].includes(provider))throw new Error('Unknown RPC provider');
+
+        const keys=readYaml(API_KEYS);
+        const sol=readYaml(SOLANA_CHAIN);
+        const net=readYaml(SOLANA_MAINNET);
+
+        let testUrl;
+        if(provider==='public'){
+          testUrl=PUBLIC_RPC;
+        }else if(provider==='helius'){
+          const supplied=String(input.heliusApiKey||'').trim();
+          const existing=String(keys.helius||'').trim();
+          const apiKey=supplied||existing;
+          if(apiKey.length<8)throw new Error('Enter a valid Helius API key (or keep the already configured key)');
+          testUrl=`https://mainnet.helius-rpc.com/?api-key=$${encodeURIComponent(apiKey)}`;
+          const result=await testSolanaRpc(testUrl);
+          keys.helius=apiKey;
+          sol.rpcProvider='helius';
+          // Write the secret directly to Gateway config. Do NOT use Gateway /config/update,
+          // because v2.15.1 logs config update values.
+          atomicYaml(API_KEYS,keys);
+          atomicYaml(SOLANA_CHAIN,sol);
+          fs.writeFileSync(`$${CONTROL}/restart.request`,JSON.stringify({at:new Date().toISOString(),provider:'helius'}),{mode:0o600});
+          return {provider:'helius',tested:true,slot:result.slot,endpoint:'https://mainnet.helius-rpc.com/?api-key=***'};
+        }else{
+          testUrl=validateRpcUrl(input.customRpcUrl);
+        }
+
+        const result=await testSolanaRpc(testUrl);
+        sol.rpcProvider='url';
+        net.nodeURL=testUrl;
+        atomicYaml(SOLANA_CHAIN,sol);
+        atomicYaml(SOLANA_MAINNET,net);
+        fs.writeFileSync(`$${CONTROL}/restart.request`,JSON.stringify({at:new Date().toISOString(),provider}),{mode:0o600});
+        return {provider,tested:true,slot:result.slot,endpoint:redactUrl(testUrl)};
+      }
+
+      const server=http.createServer(async(req,res)=>{
+        try{
+          if(req.url==='/healthz')return send(res,200,{ok:true});
+          if(!authorised(req))return send(res,401,{ok:false,error:'unauthorised'});
+          if(req.method==='GET'&&req.url==='/status')return send(res,200,{ok:true,...currentStatus()});
+          if(req.method==='POST'&&req.url==='/apply'){
+            const input=await body(req);
+            const result=await applyRpc(input);
+            return send(res,200,{ok:true,...result});
+          }
+          return send(res,404,{ok:false,error:'not found'});
+        }catch(e){
+          return send(res,400,{ok:false,error:e.message||String(e)});
+        }
+      });
+      server.listen(PORT,'0.0.0.0',()=>console.log(`[rpc-configurator] internal service ready on $${PORT}`));
+    volumes:
+    - type: volume
+      source: gateway_conf
+      target: /gateway-conf
+      volume:
+        nocopy: true
+    - type: volume
+      source: gateway_control
+      target: /gateway-control
+      volume:
+        nocopy: true
+    depends_on:
+      gateway-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - fetch('http://127.0.0.1:8081/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+    - trading_control
+  n8n-permissions:
+    image: alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+    restart: 'no'
+    user: 0:0
+    command:
+    - sh
+    - -c
+    - mkdir -p /n8n-data /bootstrap && chown -R 1000:1000 /n8n-data /bootstrap && chmod -R u+rwX /n8n-data /bootstrap
+    volumes:
+    - type: volume
+      source: n8n_data
+      target: /n8n-data
+      volume:
+        nocopy: true
+    - type: volume
+      source: bootstrap_data
+      target: /bootstrap
+      volume:
+        nocopy: true
+    network_mode: none
+  n8n-bootstrap:
+    image: docker.n8n.io/n8nio/n8n:2.31.6@sha256:3c07c723326dd72e46a6969181c66a75260b7a204b9b77ba1ece6d594489c684
+    restart: 'no'
+    entrypoint:
+    - /bin/sh
+    - -c
+    command:
+    - |
+      set -eu
+
+      EXPECTED_HASH="fde708e7cd81ca57016a3cb60fa828acfb37f29e08f7e53a2998f3232713e13b"
+      WORKFLOW_ID="JATCommunity1022"
+      MARKER="/bootstrap/workflow.sha256"
+      VERIFY="/tmp/published-verify.json"
+
+      is_published() {
+        rm -f "$$VERIFY"
+        if n8n export:workflow --id="$$WORKFLOW_ID" --published --output="$$VERIFY" >/tmp/jat-export-published.log 2>&1; then
+          node -e '
+            const fs=require("fs");
+            const p=process.argv[1];
+            const id=process.argv[2];
+            const w=JSON.parse(fs.readFileSync(p,"utf8"));
+            const a=Array.isArray(w)?w:[w];
+            const ok=a.some(x=>x && x.id===id && Array.isArray(x.nodes) &&
+              x.nodes.some(n=>n?.type==="n8n-nodes-base.webhook" && n?.parameters?.path==="jupiter-ntfy-event"));
+            process.exit(ok?0:1);
+          ' "$$VERIFY" "$$WORKFLOW_ID"
+          return $$?
+        fi
+        return 1
+      }
+
+      if [ -f "$$MARKER" ] && [ "$$(cat "$$MARKER" 2>/dev/null || true)" = "$$EXPECTED_HASH" ]; then
+        if is_published; then
+          echo "[n8n-bootstrap] workflow already installed and published; nothing to do"
+          exit 0
+        fi
+        echo "[n8n-bootstrap] marker exists but published workflow is missing/stale; repairing"
+      fi
+
+      echo "[n8n-bootstrap] decoding and deterministically upgrading embedded workflow template"
+      node -e '
+        const fs=require("fs"),crypto=require("crypto");
+        const expected=process.argv[1];
+        const w=JSON.parse(Buffer.from(process.env.JAT_WORKFLOW_B64,"base64").toString("utf8"));
+        w.name="Jupiter Auto Trader v10.2.2 - Community Internal";
+        w.id="JATCommunity1022";
+        const sourceNodes=new Set(["Get Jupiter App State","BUY Final App State","SELL Final App State"]);
+        for(const n of w.nodes||[]){
+          if(sourceNodes.has(n?.name))n.parameters.url="http://trading-controller:8080/internal/source-state";
+          if(n?.name==="Architecture / Safety"){
+            n.parameters.content=String(n.parameters.content||"")
+              .replace("## V10 COMMUNITY FINAL","## V10.2.2 COMMUNITY FINAL")
+              .replace("**v10.1.1:** fixes n8n expression parsing","**v10.2.2 release:** adds portable Docker-managed storage, fail-closed Gateway volume initialization, and configurable same-server or remote Jupiter Alerts endpoints.\n\n**Workflow safety fix retained from v10.1.1:** fixes n8n expression parsing");
+          }
+        }
+        const data=Buffer.from(JSON.stringify(w));
+        const actual=crypto.createHash("sha256").update(data).digest("hex");
+        if(actual!==expected){
+          console.error("[n8n-bootstrap] generated workflow hash mismatch: expected "+expected+" got "+actual);
+          process.exit(3);
+        }
+        fs.writeFileSync("/tmp/jat-workflow.json",data);
+      ' "$$EXPECTED_HASH"
+
+      echo "[n8n-bootstrap] checking for older Jupiter Auto Trader workflows"
+      rm -f /tmp/existing-workflows.json
+      n8n export:workflow --all --output=/tmp/existing-workflows.json >/tmp/jat-export-all.log 2>&1 || true
+
+      if [ -s /tmp/existing-workflows.json ]; then
+        MATCH_IDS="$$(node -e '
+          const fs=require("fs");
+          const raw=JSON.parse(fs.readFileSync("/tmp/existing-workflows.json","utf8"));
+          const arr=Array.isArray(raw)?raw:[raw];
+          const ids=[];
+          for(const w of arr){
+            if(!w?.id) continue;
+            const ours=String(w.name||"").startsWith("Jupiter Auto Trader") ||
+              (Array.isArray(w.nodes) && w.nodes.some(n=>n?.type==="n8n-nodes-base.webhook" &&
+                n?.parameters?.path==="jupiter-ntfy-event"));
+            if(ours) ids.push(w.id);
+          }
+          process.stdout.write(ids.join(" "));
+        ')"
+
+        for ID in $$MATCH_IDS; do
+          echo "[n8n-bootstrap] unpublishing previous workflow $$ID before replacement"
+          n8n unpublish:workflow --id="$$ID" >/tmp/jat-unpublish.log 2>&1 || true
+        done
+      fi
+
+      echo "[n8n-bootstrap] importing fixed community workflow $$WORKFLOW_ID"
+      n8n import:workflow --input=/tmp/jat-workflow.json
+
+      echo "[n8n-bootstrap] verifying imported workflow ID"
+      rm -f /tmp/imported-verify.json
+      n8n export:workflow --id="$$WORKFLOW_ID" --output=/tmp/imported-verify.json
+      node -e '
+        const fs=require("fs");
+        const p=process.argv[1],id=process.argv[2];
+        const w=JSON.parse(fs.readFileSync(p,"utf8"));
+        const a=Array.isArray(w)?w:[w];
+        if(!a.some(x=>x?.id===id)) process.exit(2);
+      ' /tmp/imported-verify.json "$$WORKFLOW_ID"
+
+      echo "[n8n-bootstrap] publishing workflow"
+      n8n publish:workflow --id="$$WORKFLOW_ID"
+
+      if ! is_published; then
+        echo "[n8n-bootstrap] ERROR: publish verification failed" >&2
+        exit 20
+      fi
+
+      rm -f /bootstrap/restart.ack
+      printf '%s' "$$EXPECTED_HASH" > /bootstrap/restart.request
+
+      echo "[n8n-bootstrap] waiting for n8n supervisor restart acknowledgement"
+      i=0
+      while [ "$$i" -lt 90 ]; do
+        ACK="$$(cat /bootstrap/restart.ack 2>/dev/null || true)"
+        if [ "$$ACK" = "$$EXPECTED_HASH" ]; then
+          break
+        fi
+        sleep 1
+        i=$$((i + 1))
+      done
+      if [ "$$i" -ge 90 ]; then
+        echo "[n8n-bootstrap] ERROR: n8n restart acknowledgement timed out" >&2
+        exit 21
+      fi
+
+      echo "[n8n-bootstrap] waiting for restarted n8n health"
+      i=0
+      while [ "$$i" -lt 90 ]; do
+        if node -e 'fetch("http://n8n:5678/healthz").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'; then
+          echo "[n8n-bootstrap] workflow installed, published and active after restart"
+          printf '%s' "$$EXPECTED_HASH" > "$$MARKER"
+          exit 0
+        fi
+        sleep 1
+        i=$$((i + 1))
+      done
+
+      echo "[n8n-bootstrap] ERROR: restarted n8n did not become healthy" >&2
+      exit 22
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?N8N_DB_PASSWORD is required and must remain stable}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?N8N_ENCRYPTION_KEY is required and must remain stable}
+      GENERIC_TIMEZONE: ${TZ:-Europe/London}
+      TZ: ${TZ:-Europe/London}
+      JAT_WORKFLOW_B64: eyJuYW1lIjoiSnVwaXRlciBBdXRvIFRyYWRlciB2MTAuMS4xIC0gQ29tbXVuaXR5IEludGVybmFsIiwibm9kZXMiOlt7InBhcmFtZXRlcnMiOnsiY29udGVudCI6IiMjIFYxMCBDT01NVU5JVFkgRklOQUxcbkNvbnRyb2xsZXI6ICoqaHR0cDovLzxzZXJ2ZXI+OjU2ODAqKlxuXG5Db21tdW5pdHktc2FmZSBkZWZhdWx0czogVEVTVElORywgTUFTVEVSIE9GRiwgbmV3IHRva2VuIGF1dG9zIE9GRiwgbm8gd2FsbGV0IGFzc2lnbm1lbnQsIHB1YmxpYyBSUEMgZm9yIHRlc3Rpbmcgb25seS4gRGFzaGJvYXJkIHN1cHBvcnRzIEhlbGl1cyAoZnJlZSB0aWVyIGF2YWlsYWJsZSkgb3IgQ3VzdG9tIFNvbGFuYSBSUEMgZm9yIGJvdGggVGVzdGluZyBhbmQgVHJhZGluZy5cblxuRXhlY3V0aW9uIHNhZmV0eSByZW1haW5zOiBleGFjdCBtaW50L3RvcGljL3RhcmdldCwgcmVwZWF0ZWQgR2F0ZXdheSB0YXJnZXQgKyBpbXBhY3QgY2hlY2tzLCBtYXgtVVNEQyBjYXAsIHBlci1jb2luIHdhbGxldCwgbGl2ZSBiYWxhbmNlcy9TT0wgcmVzZXJ2ZSwgZmluYWwgZXhlY3V0YWJsZSBxdW90ZSwgZ2xvYmFsIGxvY2ssIHRyaWdnZXIgZ3VhcmQsIGFuZCB1bmNlcnRhaW4tdHJhbnNhY3Rpb24gbG9ja291dC5cblxuKip2MTAuMS4xOioqIGZpeGVzIG44biBleHByZXNzaW9uIHBhcnNpbmcgaW4gQlVZL1NFTEwgRXhlY3V0ZSB2aWEgQ29udHJvbGxlci4gVGhlIG5lc3RlZCBxdW90ZSBvYmplY3Qgbm93IGhhcyB3aGl0ZXNwYWNlIGJldHdlZW4gaXRzIGNsb3NpbmcgYnJhY2UgYW5kIHRoZSBvdXRlciBvYmplY3QncyBjbG9zaW5nIGJyYWNlLCBwcmV2ZW50aW5nIG44biBmcm9tIG1pc3Rha2luZyBgfX1gIGluc2lkZSB0aGUgSmF2YVNjcmlwdCBvYmplY3QgZm9yIHRoZSBleHByZXNzaW9uIHRlcm1pbmF0b3IuIiwiaGVpZ2h0IjozNjAsIndpZHRoIjo2MDB9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2Uuc3RpY2t5Tm90ZSIsInR5cGVWZXJzaW9uIjoxLCJwb3NpdGlvbiI6Wy05MDAsLTUyMF0sImlkIjoiNmE3YjZkZGUtNDYzOS00MjhmLWE1Y2MtYWZhZGM5NzZmYjQwIiwibmFtZSI6IkFyY2hpdGVjdHVyZSAvIFNhZmV0eSJ9LHsicGFyYW1ldGVycyI6eyJodHRwTWV0aG9kIjoiUE9TVCIsInBhdGgiOiJqdXBpdGVyLW50ZnktZXZlbnQiLCJyZXNwb25zZU1vZGUiOiJyZXNwb25zZU5vZGUiLCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS53ZWJob29rIiwidHlwZVZlcnNpb24iOjIuMSwicG9zaXRpb24iOlstODUwLDBdLCJpZCI6ImE2NDkyNjdkLTExMDctNGNiNC1hMTk5LTk5N2ZkN2NlODhmYyIsIm5hbWUiOiJOVEZZIEFsZXJ0Iiwid2ViaG9va0lkIjoiZDhmZDA0ZmItZDg0Zi00MmYwLWJiMWEtN2E1NTEzNDgyOWIwIn0seyJwYXJhbWV0ZXJzIjp7Im1ldGhvZCI6IlBPU1QiLCJ1cmwiOiJodHRwOi8vdHJhZGluZy1jb250cm9sbGVyOjgwODAvaW50ZXJuYWwvY2xhaW0iLCJzZW5kSGVhZGVycyI6dHJ1ZSwiaGVhZGVyUGFyYW1ldGVycyI6eyJwYXJhbWV0ZXJzIjpbeyJuYW1lIjoiQ29udGVudC1UeXBlIiwidmFsdWUiOiJhcHBsaWNhdGlvbi9qc29uIn1dfSwic2VuZEJvZHkiOnRydWUsImNvbnRlbnRUeXBlIjoicmF3IiwicmF3Q29udGVudFR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIiwiYm9keSI6Ij17eyBKU09OLnN0cmluZ2lmeSh7aWQ6JCgnTlRGWSBBbGVydCcpLmZpcnN0KCkuanNvbi5ib2R5LmlkLCBoYW5kb2ZmOiQoJ05URlkgQWxlcnQnKS5maXJzdCgpLmpzb24uYm9keS5faGFuZG9mZn0pIH19Iiwib3B0aW9ucyI6e319LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuaHR0cFJlcXVlc3QiLCJ0eXBlVmVyc2lvbiI6NC4yLCJwb3NpdGlvbiI6Wy02MjAsMF0sImlkIjoiN2VmOWNhNDItNWU2ZC00MDYwLWEzYWMtN2U4YTJlOTFhZTZmIiwibmFtZSI6IkNsYWltIENvbnRyb2xsZXIgSGFuZG9mZiJ9LHsicGFyYW1ldGVycyI6eyJjb25kaXRpb25zIjp7Im9wdGlvbnMiOnsiY2FzZVNlbnNpdGl2ZSI6dHJ1ZSwibGVmdFZhbHVlIjoiIiwidHlwZVZhbGlkYXRpb24iOiJzdHJpY3QiLCJ2ZXJzaW9uIjoyfSwiY29uZGl0aW9ucyI6W3siaWQiOiI1YmIzYjNkZi01NjM5LTRiNGMtOTdmYi0xYzBlY2NmOGU2NTYiLCJsZWZ0VmFsdWUiOiI9e3sgJGpzb24uY2xhaW1lZCB9fSIsInJpZ2h0VmFsdWUiOnRydWUsIm9wZXJhdG9yIjp7InR5cGUiOiJib29sZWFuIiwib3BlcmF0aW9uIjoidHJ1ZSIsInNpbmdsZVZhbHVlIjp0cnVlfX1dLCJjb21iaW5hdG9yIjoiYW5kIn0sIm9wdGlvbnMiOnt9fSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmlmIiwidHlwZVZlcnNpb24iOjIuMiwicG9zaXRpb24iOlstMzkwLDBdLCJpZCI6IjVjOWQyNDIyLTE4ZTAtNGE2Ny05MmRjLWUzMzBlYmNkMjBmNSIsIm5hbWUiOiJWYWxpZCBIYW5kb2ZmPyJ9LHsicGFyYW1ldGVycyI6eyJqc0NvZGUiOiJyZXR1cm4gW3tqc29uOntkZWNpc2lvbjonSUdOT1JFRCcscmVhc29uOidJbnZhbGlkIG9yIGV4cGlyZWQgY29udHJvbGxlciBoYW5kb2ZmJyxleGVjdXRpb246J05PTkUnfX1dOyJ9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuY29kZSIsInR5cGVWZXJzaW9uIjoyLCJwb3NpdGlvbiI6Wy0xNTAsMjAwXSwiaWQiOiI5OWY4ZDExYi0zYjg3LTQwMGYtYWYyNi00NWYyNGFkYzY5YWIiLCJuYW1lIjoiUmVqZWN0IEZvcmdlZC9FeHBpcmVkIn0seyJwYXJhbWV0ZXJzIjp7InVybCI6Imh0dHA6Ly9ob3N0LmRvY2tlci5pbnRlcm5hbDo4MDAwL2FwaS90b2tlbnMiLCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5odHRwUmVxdWVzdCIsInR5cGVWZXJzaW9uIjo0LjIsInBvc2l0aW9uIjpbLTE1MCwtODBdLCJpZCI6IjE2OTkwZTEyLWU5N2UtNDkxMi05NTIyLWZkNjU1NTQxNDcxYyIsIm5hbWUiOiJHZXQgSnVwaXRlciBBcHAgU3RhdGUifSx7InBhcmFtZXRlcnMiOnsidXJsIjoiaHR0cDovL3RyYWRpbmctY29udHJvbGxlcjo4MDgwL2ludGVybmFsL3N0YXRlIiwib3B0aW9ucyI6e319LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuaHR0cFJlcXVlc3QiLCJ0eXBlVmVyc2lvbiI6NC4yLCJwb3NpdGlvbiI6WzgwLC04MF0sImlkIjoiNDk0ZGQ5ZjgtOGNkNC00MzI1LWI4MzMtNWQ3NzM1OWVmYTRkIiwibmFtZSI6IkdldCBUcmFkaW5nIENvbnRyb2xsZXIgU3RhdGUifSx7InBhcmFtZXRlcnMiOnsianNDb2RlIjoiXG5jb25zdCBhcGk9JCgnR2V0IEp1cGl0ZXIgQXBwIFN0YXRlJykuZmlyc3QoKS5qc29uPz97fTtcbmNvbnN0IGN0cmw9JCgnR2V0IFRyYWRpbmcgQ29udHJvbGxlciBTdGF0ZScpLmZpcnN0KCkuanNvbj8uc3RhdGU/P3t9O1xuY29uc3QgcD0kKCdOVEZZIEFsZXJ0JykuZmlyc3QoKS5qc29uLmJvZHk/P3t9O1xuY29uc3QgZ2F0ZXdheVRva2VuUmVhZHk9cC5fZ2F0ZXdheVRva2VuUmVhZHkhPT1mYWxzZTtcbmNvbnN0IGdhdGV3YXlUb2tlbkVycm9yPVN0cmluZyhwLl9nYXRld2F5VG9rZW5FcnJvcnx8JycpO1xuY29uc3QgdHJhZGluZ1RvcGljUmVhZHk9cC5fdHJhZGluZ1RvcGljUmVhZHk9PT10cnVlO1xuY29uc3QgdG9rZW5zPUFycmF5LmlzQXJyYXkoYXBpLnRva2Vucyk/YXBpLnRva2VuczpbXTtcbmNvbnN0IHN1bXM9QXJyYXkuaXNBcnJheShhcGkuc3VtbWFyaWVzKT9hcGkuc3VtbWFyaWVzOltdO1xuY29uc3Qgc209bmV3IE1hcChzdW1zLm1hcChzPT5bcy5taW50LHNdKSk7XG5jb25zdCBub3c9TWF0aC5mbG9vcihEYXRlLm5vdygpLzEwMDApO1xuY29uc3QgdGl0bGU9U3RyaW5nKHAudGl0bGV8fCcnKSxtc2c9U3RyaW5nKHAubWVzc2FnZXx8JycpLHRvcGljPVN0cmluZyhwLnRvcGljfHwnJyk7XG5sZXQgZGlyZWN0aW9uPW51bGw7aWYodGl0bGUuc3RhcnRzV2l0aCgnQnV5IFByaWNlIEFsZXJ0JykpZGlyZWN0aW9uPSdCVVknO2lmKHRpdGxlLnN0YXJ0c1dpdGgoJ1NlbGwgUHJpY2UgQWxlcnQnKSlkaXJlY3Rpb249J1NFTEwnO1xuY29uc3QgdGw9bXNnLm1hdGNoKC9eVG9rZW46XFxzKiguKj8pXFxzK1xcKChbMS05QS1ISi1OUC1aYS1rbS16XXszMiw0NH0pXFwpXFxzKiQvbSk7XG5jb25zdCBtaW50PXRsP3RsWzJdOm51bGw7XG5jb25zdCBtYXRjaGVzPW1pbnQ/dG9rZW5zLmZpbHRlcih0PT50Lm1pbnQ9PT1taW50KTpbXTtcbmNvbnN0IHRva2VuPW1hdGNoZXMubGVuZ3RoPT09MT9tYXRjaGVzWzBdOm51bGw7XG5jb25zdCBzdW1tYXJ5PXRva2VuPyhzbS5nZXQodG9rZW4ubWludCl8fHt9KTp7fTtcbmNvbnN0IHBtPW1zZy5tYXRjaCgvKD86QnV5fFNlbGwpXFxzK3ByaWNlXFxzK1xcJChbMC05LmVFKy1dKylcXHMraXNcXHMrKD86PD18Pj0pXFxzK3RhcmdldFxccytcXCQoWzAtOS5lRSstXSspL2kpO1xuY29uc3Qgb2JzZXJ2ZWQ9cG0/TnVtYmVyKHBtWzFdKTpudWxsLHRhcmdldD1wbT9OdW1iZXIocG1bMl0pOm51bGw7XG5jb25zdCBhbGVydHM9ZGlyZWN0aW9uPT09J0JVWSc/KHRva2VuPy5idXlfYWxlcnRzfHxbXSk6ZGlyZWN0aW9uPT09J1NFTEwnPyh0b2tlbj8uc2VsbF9hbGVydHN8fFtdKTpbXTtcbmNvbnN0IHRhcmdldENvbmZpZ3VyZWQ9TnVtYmVyLmlzRmluaXRlKHRhcmdldCkmJnRhcmdldD4wJiZhbGVydHMuc29tZSh2PT5NYXRoLmFicyhOdW1iZXIodiktdGFyZ2V0KTw9TWF0aC5tYXgoMWUtMTIsTWF0aC5hYnModGFyZ2V0KSoxZS05KSk7XG5jb25zdCBlZmZlY3RpdmVUb3BpYz1zdW1tYXJ5Lm50ZnlfZWZmZWN0aXZlX3RvcGljfHx0b2tlbj8ubnRmeV90b3BpY3x8bnVsbDtcbmNvbnN0IGM9dG9rZW4/KGN0cmwudG9rZW5zPy5bdG9rZW4ubWludF18fHthdXRvQnV5OmZhbHNlLGF1dG9TZWxsOmZhbHNlLHdhbGxldDpudWxsfSk6e2F1dG9CdXk6ZmFsc2UsYXV0b1NlbGw6ZmFsc2Usd2FsbGV0Om51bGx9O1xuY29uc3QgYWdlPU51bWJlcihwLnRpbWUpPjA/bm93LU51bWJlcihwLnRpbWUpOm51bGw7XG5jb25zdCBvYnNlcnZlZE9LPWRpcmVjdGlvbj09PSdCVVknP29ic2VydmVkPD10YXJnZXQ6ZGlyZWN0aW9uPT09J1NFTEwnP29ic2VydmVkPj10YXJnZXQ6ZmFsc2U7XG5sZXQgcmVhc29uPW51bGw7XG5pZihwLmV2ZW50IT09J21lc3NhZ2UnKXJlYXNvbj0nbm90IGFuIG50ZnkgbWVzc2FnZSBldmVudCc7XG5lbHNlIGlmKCFwLmlkKXJlYXNvbj0nbWlzc2luZyBudGZ5IGlkJztcbmVsc2UgaWYoIWRpcmVjdGlvbilyZWFzb249J25vdCBhIG5vcm1hbCBCdXkvU2VsbCBQcmljZSBBbGVydCc7XG5lbHNlIGlmKCF0bHx8bWF0Y2hlcy5sZW5ndGghPT0xKXJlYXNvbj0nVG9rZW4gbGluZS9taW50IGRvZXMgbm90IHVuaXF1ZWx5IG1hdGNoIGFwcCBjb25maWcnO1xuZWxzZSBpZih0b3BpYyE9PWVmZmVjdGl2ZVRvcGljKXJlYXNvbj0nbnRmeSB0b3BpYyBkb2VzIG5vdCBtYXRjaCB0b2tlbiBlZmZlY3RpdmUgdG9waWMnO1xuZWxzZSBpZighTnVtYmVyLmlzRmluaXRlKG9ic2VydmVkKXx8b2JzZXJ2ZWQ8PTB8fCFOdW1iZXIuaXNGaW5pdGUodGFyZ2V0KXx8dGFyZ2V0PD0wKXJlYXNvbj0naW52YWxpZCBvYnNlcnZlZCBwcmljZS90YXJnZXQnO1xuZWxzZSBpZighb2JzZXJ2ZWRPSylyZWFzb249J2FsZXJ0IHRleHQgZG9lcyBub3Qgc2F0aXNmeSBpdHMgb3duIHRyaWdnZXInO1xuZWxzZSBpZihhZ2U9PT1udWxsfHxhZ2UgPCAtMTB8fGFnZT4xMjApcmVhc29uPWBzdGFsZS9pbnZhbGlkIG50ZnkgdGltZXN0YW1wICgke2FnZX1zKWA7XG5lbHNlIGlmKHRva2VuLmVuYWJsZWQhPT10cnVlKXJlYXNvbj0ndG9rZW4gZGlzYWJsZWQgaW4gYXBwJztcbmVsc2UgaWYoIU51bWJlci5pc0Zpbml0ZShOdW1iZXIodG9rZW4udXNkX2Ftb3VudCkpfHxOdW1iZXIodG9rZW4udXNkX2Ftb3VudCk8PTApcmVhc29uPSdpbnZhbGlkIFVTREMgc2NlbmFyaW8nO1xuZWxzZSBpZihOdW1iZXIodG9rZW4udXNkX2Ftb3VudCk+TnVtYmVyKGN0cmwubWF4VHJhZGVVU0RDfHw1MDApKXJlYXNvbj1gVVNEQyBzY2VuYXJpbyAke051bWJlcih0b2tlbi51c2RfYW1vdW50KX0gZXhjZWVkcyBtYXggdHJhZGUgY2FwICR7TnVtYmVyKGN0cmwubWF4VHJhZGVVU0RDfHw1MDApfWA7XG5lbHNlIGlmKCF0YXJnZXRDb25maWd1cmVkKXJlYXNvbj0nZmlyZWQgdGFyZ2V0IG5vIGxvbmdlciBjb25maWd1cmVkJztcbmVsc2UgaWYoIWdhdGV3YXlUb2tlblJlYWR5KXJlYXNvbj1gR2F0ZXdheSB0b2tlbiBwcmVwYXJhdGlvbiBmYWlsZWQ6ICR7Z2F0ZXdheVRva2VuRXJyb3J8fCd1bmtub3duIGVycm9yJ31gO1xuZWxzZSBpZihjdHJsLm1vZGU9PT0ndHJhZGluZycmJiF0cmFkaW5nVG9waWNSZWFkeSlyZWFzb249J3JlYWwgdHJhZGluZyByZXF1aXJlcyB0aGUgY29udHJvbGxlci1nZW5lcmF0ZWQgcHJpdmF0ZSBudGZ5IFRyYWRpbmcgVG9waWMnO1xuZWxzZSBpZihjdHJsLnNhZmV0eUxvY2spcmVhc29uPWBzYWZldHkgbG9jazogJHtjdHJsLnNhZmV0eVJlYXNvbnx8J2FjdGl2ZSd9YDtcbmVsc2UgaWYoY3RybC5tYXN0ZXIhPT10cnVlKXJlYXNvbj0nTUFTVEVSIEFVVE8gVFJBRElORyBpcyBPRkYnO1xuZWxzZSBpZihkaXJlY3Rpb249PT0nQlVZJyYmYy5hdXRvQnV5IT09dHJ1ZSlyZWFzb249YCR7dG9rZW4ubmFtZX0gQVVUTyBCVVkgaXMgT0ZGYDtcbmVsc2UgaWYoZGlyZWN0aW9uPT09J1NFTEwnJiZjLmF1dG9TZWxsIT09dHJ1ZSlyZWFzb249YCR7dG9rZW4ubmFtZX0gQVVUTyBTRUxMIGlzIE9GRmA7XG5yZXR1cm4gW3tqc29uOntcbiBlbGlnaWJsZTpyZWFzb249PT1udWxsLHJlYXNvbixhbGVydElkOnAuaWQsbmFtZTp0b2tlbj8ubmFtZXx8bnVsbCxtaW50OnRva2VuPy5taW50fHxudWxsLGRpcmVjdGlvbixcbiB0YXJnZXQsb2JzZXJ2ZWRQcmljZTpvYnNlcnZlZCx1c2RBbW91bnQ6TnVtYmVyKHRva2VuPy51c2RfYW1vdW50fHwwKSxtb2RlOmN0cmwubW9kZXx8J3Rlc3RpbmcnLFxuIG1hc3RlcjpjdHJsLm1hc3Rlcj09PXRydWUsYXV0b0J1eTpjLmF1dG9CdXk9PT10cnVlLGF1dG9TZWxsOmMuYXV0b1NlbGw9PT10cnVlLFxuIGFzc2lnbmVkV2FsbGV0OmMud2FsbGV0fHxudWxsLGdhdGV3YXlUb2tlblJlYWR5LGdhdGV3YXlUb2tlbkVycm9yLHRyYWRpbmdUb3BpY1JlYWR5LHRvcGljLFxuIHNlbGVjdGVkV2FsbGV0OmN0cmwuc2VsZWN0ZWRXYWxsZXR8fG51bGwsbWluU29sUmVzZXJ2ZTpOdW1iZXIoY3RybC5taW5Tb2xSZXNlcnZlfHwwKSxzbGlwcGFnZVBjdDpOdW1iZXIoY3RybC5zbGlwcGFnZVBjdHx8MSksXG4gbWF4UHJpY2VJbXBhY3RQY3Q6TnVtYmVyKGN0cmwubWF4UHJpY2VJbXBhY3RQY3R8fDIpLG1heFRyYWRlVVNEQzpOdW1iZXIoY3RybC5tYXhUcmFkZVVTREN8fDUwMClcbn19XTtcbiJ9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuY29kZSIsInR5cGVWZXJzaW9uIjoyLCJwb3NpdGlvbiI6WzMxMCwtODBdLCJpZCI6IjI2N2FkOWMzLTIyZmYtNGNmYy04ZjlkLTg4MmFhMzJjOTcwYiIsIm5hbWUiOiJQYXJzZSArIEF1dGhvcml6ZSJ9LHsicGFyYW1ldGVycyI6eyJjb25kaXRpb25zIjp7Im9wdGlvbnMiOnsiY2FzZVNlbnNpdGl2ZSI6dHJ1ZSwibGVmdFZhbHVlIjoiIiwidHlwZVZhbGlkYXRpb24iOiJzdHJpY3QiLCJ2ZXJzaW9uIjoyfSwiY29uZGl0aW9ucyI6W3siaWQiOiI2ZTFjNDQ0MS01Y2RkLTRiNGQtYjNjMi05OWM5Y2NmNDRkMzkiLCJsZWZ0VmFsdWUiOiI9e3sgJGpzb24uZWxpZ2libGUgfX0iLCJyaWdodFZhbHVlIjp0cnVlLCJvcGVyYXRvciI6eyJ0eXBlIjoiYm9vbGVhbiIsIm9wZXJhdGlvbiI6InRydWUiLCJzaW5nbGVWYWx1ZSI6dHJ1ZX19XSwiY29tYmluYXRvciI6ImFuZCJ9LCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5pZiIsInR5cGVWZXJzaW9uIjoyLjIsInBvc2l0aW9uIjpbNTQwLC04MF0sImlkIjoiMDlhNWEzOTMtYjNkNC00ZTY4LTkxMDgtZjVkZTA0MjAwMjcwIiwibmFtZSI6IkF1dGhvcml6ZWQ/In0seyJwYXJhbWV0ZXJzIjp7ImpzQ29kZSI6InJldHVybiBbe2pzb246e2RlY2lzaW9uOidJR05PUkVEJyxyZWFzb246JGpzb24ucmVhc29uLHRva2VuOiRqc29uLm5hbWUsbWludDokanNvbi5taW50LGRpcmVjdGlvbjokanNvbi5kaXJlY3Rpb24sdGFyZ2V0OiRqc29uLnRhcmdldCxleGVjdXRpb246J05PTkUnfX1dOyJ9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuY29kZSIsInR5cGVWZXJzaW9uIjoyLCJwb3NpdGlvbiI6Wzc4MCwxMzBdLCJpZCI6ImNiM2I1ZGExLWVhOWYtNDk2NC1hYWY3LWM3NjYwMWRmM2ViMSIsIm5hbWUiOiJJZ25vcmVkIn0seyJwYXJhbWV0ZXJzIjp7InVybCI6Imh0dHA6Ly9nYXRld2F5OjE1ODg4L2Nvbm5lY3RvcnMvanVwaXRlci9yb3V0ZXIvcXVvdGUtc3dhcCIsInNlbmRRdWVyeSI6dHJ1ZSwicXVlcnlQYXJhbWV0ZXJzIjp7InBhcmFtZXRlcnMiOlt7Im5hbWUiOiJuZXR3b3JrIiwidmFsdWUiOiJtYWlubmV0LWJldGEifSx7Im5hbWUiOiJiYXNlVG9rZW4iLCJ2YWx1ZSI6IkVQakZXZGQ1QXVmcVNTcWVNMnFOMXh6eWJhcEM4RzR3RUdHa1p3eVREdDF2In0seyJuYW1lIjoicXVvdGVUb2tlbiIsInZhbHVlIjoiPXt7ICQoJ1BhcnNlICsgQXV0aG9yaXplJykuZmlyc3QoKS5qc29uLm1pbnQgfX0ifSx7Im5hbWUiOiJhbW91bnQiLCJ2YWx1ZSI6Ij17eyAkKCdQYXJzZSArIEF1dGhvcml6ZScpLmZpcnN0KCkuanNvbi51c2RBbW91bnQgfX0ifSx7Im5hbWUiOiJzaWRlIiwidmFsdWUiOiJTRUxMIn0seyJuYW1lIjoic2xpcHBhZ2VQY3QiLCJ2YWx1ZSI6Ij17eyAkKCdQYXJzZSArIEF1dGhvcml6ZScpLmZpcnN0KCkuanNvbi5zbGlwcGFnZVBjdCB9fSJ9XX0sIm9wdGlvbnMiOnt9fSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmh0dHBSZXF1ZXN0IiwidHlwZVZlcnNpb24iOjQuMiwicG9zaXRpb24iOls3ODAsLTE4MF0sImlkIjoiMjRlOWIzNjMtYjhjMy00ZjUzLWFiYWEtOGZiNzE4NjNmN2U1IiwibmFtZSI6IlNjZW5hcmlvIFF1b3RlICMxIn0seyJwYXJhbWV0ZXJzIjp7ImNvbmRpdGlvbnMiOnsib3B0aW9ucyI6eyJjYXNlU2Vuc2l0aXZlIjp0cnVlLCJsZWZ0VmFsdWUiOiIiLCJ0eXBlVmFsaWRhdGlvbiI6InN0cmljdCIsInZlcnNpb24iOjJ9LCJjb25kaXRpb25zIjpbeyJpZCI6IjQzNWYwY2IzLWZjMmUtNDQ0ZS04OTBkLTZjYTcxYzMyYTUyOCIsImxlZnRWYWx1ZSI6Ij17eyAkKCdQYXJzZSArIEF1dGhvcml6ZScpLmZpcnN0KCkuanNvbi5kaXJlY3Rpb24gfX0iLCJyaWdodFZhbHVlIjoiU0VMTCIsIm9wZXJhdG9yIjp7InR5cGUiOiJzdHJpbmciLCJvcGVyYXRpb24iOiJlcXVhbHMifX1dLCJjb21iaW5hdG9yIjoiYW5kIn0sIm9wdGlvbnMiOnt9fSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmlmIiwidHlwZVZlcnNpb24iOjIuMiwicG9zaXRpb24iOlsxMDEwLC0xODBdLCJpZCI6ImIwMTU0MWUxLTZlMGQtNGNjMy1iZDU5LWNlOTRjOGQ1YTcwMiIsIm5hbWUiOiJTRUxMIEFsZXJ0PyJ9LHsicGFyYW1ldGVycyI6eyJqc0NvZGUiOiJjb25zdCBjPSQoJ1BhcnNlICsgQXV0aG9yaXplJykuZmlyc3QoKS5qc29uLHE9JGpzb247XG5jb25zdCBhaT1OdW1iZXIocS5hbW91bnRJbiksYW89TnVtYmVyKHEuYW1vdW50T3V0KSxwPShhaT4wJiZhbz4wKT9haS9hbzpudWxsO1xuY29uc3QgcmF3SW1wYWN0PU51bWJlcihxLnByaWNlSW1wYWN0UGN0KSxpbXBhY3RQY3Q9TnVtYmVyLmlzRmluaXRlKHJhd0ltcGFjdCk/TWF0aC5hYnMocmF3SW1wYWN0KSoxMDA6bnVsbDtcbmNvbnN0IHByaWNlT0s9TnVtYmVyLmlzRmluaXRlKHApJiZwPD1jLnRhcmdldDtcbmNvbnN0IGltcGFjdE9LPWltcGFjdFBjdCE9PW51bGwmJmltcGFjdFBjdDw9Yy5tYXhQcmljZUltcGFjdFBjdDtcbmxldCByZWFzb249bnVsbDtcbmlmKCFwcmljZU9LKXJlYXNvbj0nQlVZIHZhbGlkYXRpb24gIzEgcHJpY2UgaXMgYWJvdmUgdGhlIGZpcmVkIHRhcmdldCc7XG5lbHNlIGlmKCFpbXBhY3RPSylyZWFzb249YEJVWSB2YWxpZGF0aW9uICMxIHByaWNlIGltcGFjdCAke2ltcGFjdFBjdD09PW51bGw/J2ludmFsaWQnOmltcGFjdFBjdC50b0ZpeGVkKDIpKyclJ30gZXhjZWVkcyBjYXAgJHtjLm1heFByaWNlSW1wYWN0UGN0fSVgO1xucmV0dXJuIFt7anNvbjp7Li4uYyxwYXNzOnByaWNlT0smJmltcGFjdE9LLHByaWNlMTpwLGltcGFjdDE6cmF3SW1wYWN0LGltcGFjdDFQZXJjZW50OmltcGFjdFBjdCxyZWFzb259fV07In0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5jb2RlIiwidHlwZVZlcnNpb24iOjIsInBvc2l0aW9uIjpbMTI0MCwyMF0sImlkIjoiZjkzMmY5ZjAtZDIxMS00MjdlLTgxNDgtMDQ3MWUzZDAzNzdkIiwibmFtZSI6IkV2YWx1YXRlIEJVWSAjMSJ9LHsicGFyYW1ldGVycyI6eyJjb25kaXRpb25zIjp7Im9wdGlvbnMiOnsiY2FzZVNlbnNpdGl2ZSI6dHJ1ZSwibGVmdFZhbHVlIjoiIiwidHlwZVZhbGlkYXRpb24iOiJzdHJpY3QiLCJ2ZXJzaW9uIjoyfSwiY29uZGl0aW9ucyI6W3siaWQiOiI5YTcxY2Y0Ny03NGU5LTQ0NGUtOTk0ZC1kZTg4MDUyMjM1MDIiLCJsZWZ0VmFsdWUiOiI9e3sgJGpzb24ucGFzcyB9fSIsInJpZ2h0VmFsdWUiOnRydWUsIm9wZXJhdG9yIjp7InR5cGUiOiJib29sZWFuIiwib3BlcmF0aW9uIjoidHJ1ZSIsInNpbmdsZVZhbHVlIjp0cnVlfX1dLCJjb21iaW5hdG9yIjoiYW5kIn0sIm9wdGlvbnMiOnt9fSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmlmIiwidHlwZVZlcnNpb24iOjIuMiwicG9zaXRpb24iOlsxNDcwLDIwXSwiaWQiOiIwN2JkZGRkOS00M2QzLTQ2MzMtYmVkOS05OGUwYTJmMjhkYjEiLCJuYW1lIjoiQlVZICMxIFBhc3M/In0seyJwYXJhbWV0ZXJzIjp7ImFtb3VudCI6MiwidW5pdCI6InNlY29uZHMifSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLndhaXQiLCJ0eXBlVmVyc2lvbiI6MS4xLCJwb3NpdGlvbiI6WzE3MDAsLTIwXSwiaWQiOiIwMjBjZWI3Yi1kY2RmLTQxMzAtYmRhMS00YmI0ZjlkMjViYWMiLCJuYW1lIjoiV2FpdCAycyBCVVkifSx7InBhcmFtZXRlcnMiOnsidXJsIjoiaHR0cDovL2dhdGV3YXk6MTU4ODgvY29ubmVjdG9ycy9qdXBpdGVyL3JvdXRlci9xdW90ZS1zd2FwIiwic2VuZFF1ZXJ5Ijp0cnVlLCJxdWVyeVBhcmFtZXRlcnMiOnsicGFyYW1ldGVycyI6W3sibmFtZSI6Im5ldHdvcmsiLCJ2YWx1ZSI6Im1haW5uZXQtYmV0YSJ9LHsibmFtZSI6ImJhc2VUb2tlbiIsInZhbHVlIjoiRVBqRldkZDVBdWZxU1NxZU0ycU4xeHp5YmFwQzhHNHdFR0drWnd5VER0MXYifSx7Im5hbWUiOiJxdW90ZVRva2VuIiwidmFsdWUiOiI9e3sgJCgnUGFyc2UgKyBBdXRob3JpemUnKS5maXJzdCgpLmpzb24ubWludCB9fSJ9LHsibmFtZSI6ImFtb3VudCIsInZhbHVlIjoiPXt7ICQoJ1BhcnNlICsgQXV0aG9yaXplJykuZmlyc3QoKS5qc29uLnVzZEFtb3VudCB9fSJ9LHsibmFtZSI6InNpZGUiLCJ2YWx1ZSI6IlNFTEwifSx7Im5hbWUiOiJzbGlwcGFnZVBjdCIsInZhbHVlIjoiPXt7ICQoJ1BhcnNlICsgQXV0aG9yaXplJykuZmlyc3QoKS5qc29uLnNsaXBwYWdlUGN0IH19In1dfSwib3B0aW9ucyI6e319LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuaHR0cFJlcXVlc3QiLCJ0eXBlVmVyc2lvbiI6NC4yLCJwb3NpdGlvbiI6WzE5MzAsLTIwXSwiaWQiOiI1N2M4MzBlOC0yYzJjLTQ0ODktYjczMC1lZDQ2YTM2OGVkOTYiLCJuYW1lIjoiQlVZIFF1b3RlICMyIn0seyJwYXJhbWV0ZXJzIjp7ImpzQ29kZSI6ImNvbnN0IGM9JCgnUGFyc2UgKyBBdXRob3JpemUnKS5maXJzdCgpLmpzb24scT0kanNvbixmaXJzdD0kKCdFdmFsdWF0ZSBCVVkgIzEnKS5maXJzdCgpLmpzb247XG5jb25zdCBhaT1OdW1iZXIocS5hbW91bnRJbiksYW89TnVtYmVyKHEuYW1vdW50T3V0KSxwPShhaT4wJiZhbz4wKT9haS9hbzpudWxsO1xuY29uc3QgcmF3SW1wYWN0PU51bWJlcihxLnByaWNlSW1wYWN0UGN0KSxpbXBhY3RQY3Q9TnVtYmVyLmlzRmluaXRlKHJhd0ltcGFjdCk/TWF0aC5hYnMocmF3SW1wYWN0KSoxMDA6bnVsbDtcbmNvbnN0IHByaWNlT0s9TnVtYmVyLmlzRmluaXRlKHApJiZwPD1jLnRhcmdldDtcbmNvbnN0IGltcGFjdE9LPWltcGFjdFBjdCE9PW51bGwmJmltcGFjdFBjdDw9Yy5tYXhQcmljZUltcGFjdFBjdDtcbmxldCByZWFzb249bnVsbDtcbmlmKCFmaXJzdC5wYXNzKXJlYXNvbj1maXJzdC5yZWFzb258fCdCVVkgdmFsaWRhdGlvbiAjMSBmYWlsZWQnO1xuZWxzZSBpZighcHJpY2VPSylyZWFzb249J0JVWSB2YWxpZGF0aW9uICMyIHByaWNlIGlzIGFib3ZlIHRoZSBmaXJlZCB0YXJnZXQnO1xuZWxzZSBpZighaW1wYWN0T0spcmVhc29uPWBCVVkgdmFsaWRhdGlvbiAjMiBwcmljZSBpbXBhY3QgJHtpbXBhY3RQY3Q9PT1udWxsPydpbnZhbGlkJzppbXBhY3RQY3QudG9GaXhlZCgyKSsnJSd9IGV4Y2VlZHMgY2FwICR7Yy5tYXhQcmljZUltcGFjdFBjdH0lYDtcbnJldHVybiBbe2pzb246ey4uLmMscHJpY2UxOmZpcnN0LnByaWNlMSxpbXBhY3QxUGVyY2VudDpmaXJzdC5pbXBhY3QxUGVyY2VudCxwcmljZTI6cCxpbXBhY3QyUGVyY2VudDppbXBhY3RQY3QscGFzczpmaXJzdC5wYXNzJiZwcmljZU9LJiZpbXBhY3RPSyxyZWFzb259fV07In0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5jb2RlIiwidHlwZVZlcnNpb24iOjIsInBvc2l0aW9uIjpbMjE2MCwtMjBdLCJpZCI6ImMyYTIzOGE5LTIwMDMtNDUyZi1hMmFjLTFiMGQwMDZmMDEwYyIsIm5hbWUiOiJFdmFsdWF0ZSBCVVkgIzIifSx7InBhcmFtZXRlcnMiOnsiY29uZGl0aW9ucyI6eyJvcHRpb25zIjp7ImNhc2VTZW5zaXRpdmUiOnRydWUsImxlZnRWYWx1ZSI6IiIsInR5cGVWYWxpZGF0aW9uIjoic3RyaWN0IiwidmVyc2lvbiI6Mn0sImNvbmRpdGlvbnMiOlt7ImlkIjoiZmY1Yzk5ODEtYWYwNy00Mjk5LWI5YjgtMTU3NGNiNzFjYjQwIiwibGVmdFZhbHVlIjoiPXt7ICRqc29uLnBhc3MgfX0iLCJyaWdodFZhbHVlIjp0cnVlLCJvcGVyYXRvciI6eyJ0eXBlIjoiYm9vbGVhbiIsIm9wZXJhdGlvbiI6InRydWUiLCJzaW5nbGVWYWx1ZSI6dHJ1ZX19XSwiY29tYmluYXRvciI6ImFuZCJ9LCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5pZiIsInR5cGVWZXJzaW9uIjoyLjIsInBvc2l0aW9uIjpbMjM5MCwtMjBdLCJpZCI6IjMwMjI0MmVlLTllMjUtNDQwNS05NGNhLWRkNjEzZDgyZjI0NiIsIm5hbWUiOiJCVVkgIzIgUGFzcz8ifSx7InBhcmFtZXRlcnMiOnsiYW1vdW50IjoyLCJ1bml0Ijoic2Vjb25kcyJ9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2Uud2FpdCIsInR5cGVWZXJzaW9uIjoxLjEsInBvc2l0aW9uIjpbMTI0MCwtMzIwXSwiaWQiOiJjYTJhOTA5Ny02OTA1LTRkMDMtYTUzMC0wMWRhMjAzNzVhNWQiLCJuYW1lIjoiV2FpdCAycyBTRUxMIHNpemluZyJ9LHsicGFyYW1ldGVycyI6eyJ1cmwiOiJodHRwOi8vZ2F0ZXdheToxNTg4OC9jb25uZWN0b3JzL2p1cGl0ZXIvcm91dGVyL3F1b3RlLXN3YXAiLCJzZW5kUXVlcnkiOnRydWUsInF1ZXJ5UGFyYW1ldGVycyI6eyJwYXJhbWV0ZXJzIjpbeyJuYW1lIjoibmV0d29yayIsInZhbHVlIjoibWFpbm5ldC1iZXRhIn0seyJuYW1lIjoiYmFzZVRva2VuIiwidmFsdWUiOiI9e3sgJCgnUGFyc2UgKyBBdXRob3JpemUnKS5maXJzdCgpLmpzb24ubWludCB9fSJ9LHsibmFtZSI6InF1b3RlVG9rZW4iLCJ2YWx1ZSI6IkVQakZXZGQ1QXVmcVNTcWVNMnFOMXh6eWJhcEM4RzR3RUdHa1p3eVREdDF2In0seyJuYW1lIjoiYW1vdW50IiwidmFsdWUiOiI9e3sgJCgnU2NlbmFyaW8gUXVvdGUgIzEnKS5maXJzdCgpLmpzb24uYW1vdW50T3V0IH19In0seyJuYW1lIjoic2lkZSIsInZhbHVlIjoiU0VMTCJ9LHsibmFtZSI6InNsaXBwYWdlUGN0IiwidmFsdWUiOiI9e3sgJCgnUGFyc2UgKyBBdXRob3JpemUnKS5maXJzdCgpLmpzb24uc2xpcHBhZ2VQY3QgfX0ifV19LCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5odHRwUmVxdWVzdCIsInR5cGVWZXJzaW9uIjo0LjIsInBvc2l0aW9uIjpbMTQ3MCwtMzIwXSwiaWQiOiJkNzVjNTg4ZS1jYTg0LTRmMmYtOWI5My02NmZhOWE2MjE0MTAiLCJuYW1lIjoiU0VMTCBRdW90ZSAjMSJ9LHsicGFyYW1ldGVycyI6eyJqc0NvZGUiOiJjb25zdCBjPSQoJ1BhcnNlICsgQXV0aG9yaXplJykuZmlyc3QoKS5qc29uLHE9JGpzb24sc2NlbmFyaW89JCgnU2NlbmFyaW8gUXVvdGUgIzEnKS5maXJzdCgpLmpzb247XG5jb25zdCBhaT1OdW1iZXIocS5hbW91bnRJbiksYW89TnVtYmVyKHEuYW1vdW50T3V0KSxleHBlY3RlZD1OdW1iZXIoc2NlbmFyaW8uYW1vdW50T3V0KSxwPShhaT4wJiZhbz4wKT9hby9haTpudWxsO1xuY29uc3QgYW1vdW50T0s9TWF0aC5hYnMoYWktZXhwZWN0ZWQpPD1NYXRoLm1heCgxZS0xMixNYXRoLmFicyhleHBlY3RlZCkqMWUtOSk7XG5jb25zdCBzY2VuYXJpb1Jhdz1OdW1iZXIoc2NlbmFyaW8ucHJpY2VJbXBhY3RQY3QpLHNjZW5hcmlvSW1wYWN0UGN0PU51bWJlci5pc0Zpbml0ZShzY2VuYXJpb1Jhdyk/TWF0aC5hYnMoc2NlbmFyaW9SYXcpKjEwMDpudWxsO1xuY29uc3QgcmF3SW1wYWN0PU51bWJlcihxLnByaWNlSW1wYWN0UGN0KSxpbXBhY3RQY3Q9TnVtYmVyLmlzRmluaXRlKHJhd0ltcGFjdCk/TWF0aC5hYnMocmF3SW1wYWN0KSoxMDA6bnVsbDtcbmNvbnN0IHByaWNlT0s9TnVtYmVyLmlzRmluaXRlKHApJiZwPj1jLnRhcmdldDtcbmNvbnN0IHNjZW5hcmlvSW1wYWN0T0s9c2NlbmFyaW9JbXBhY3RQY3QhPT1udWxsJiZzY2VuYXJpb0ltcGFjdFBjdDw9Yy5tYXhQcmljZUltcGFjdFBjdDtcbmNvbnN0IGltcGFjdE9LPWltcGFjdFBjdCE9PW51bGwmJmltcGFjdFBjdDw9Yy5tYXhQcmljZUltcGFjdFBjdDtcbmxldCByZWFzb249bnVsbDtcbmlmKCFhbW91bnRPSylyZWFzb249J1NFTEwgdmFsaWRhdGlvbiAjMSB0b2tlbiBhbW91bnQgZGlmZmVycyBmcm9tIHNjZW5hcmlvIHNpemluZyc7XG5lbHNlIGlmKCFzY2VuYXJpb0ltcGFjdE9LKXJlYXNvbj1gU0VMTCBzaXppbmcgcXVvdGUgcHJpY2UgaW1wYWN0ICR7c2NlbmFyaW9JbXBhY3RQY3Q9PT1udWxsPydpbnZhbGlkJzpzY2VuYXJpb0ltcGFjdFBjdC50b0ZpeGVkKDIpKyclJ30gZXhjZWVkcyBjYXAgJHtjLm1heFByaWNlSW1wYWN0UGN0fSVgO1xuZWxzZSBpZighcHJpY2VPSylyZWFzb249J1NFTEwgdmFsaWRhdGlvbiAjMSBwcmljZSBpcyBiZWxvdyB0aGUgZmlyZWQgdGFyZ2V0JztcbmVsc2UgaWYoIWltcGFjdE9LKXJlYXNvbj1gU0VMTCB2YWxpZGF0aW9uICMxIHByaWNlIGltcGFjdCAke2ltcGFjdFBjdD09PW51bGw/J2ludmFsaWQnOmltcGFjdFBjdC50b0ZpeGVkKDIpKyclJ30gZXhjZWVkcyBjYXAgJHtjLm1heFByaWNlSW1wYWN0UGN0fSVgO1xucmV0dXJuIFt7anNvbjp7Li4uYyx0b2tlbkFtb3VudDpleHBlY3RlZCxwYXNzOmFtb3VudE9LJiZzY2VuYXJpb0ltcGFjdE9LJiZwcmljZU9LJiZpbXBhY3RPSyxwcmljZTE6cCxcbiBzY2VuYXJpb0ltcGFjdFBlcmNlbnQ6c2NlbmFyaW9JbXBhY3RQY3QsaW1wYWN0MVBlcmNlbnQ6aW1wYWN0UGN0LHJlYXNvbn19XTsifSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmNvZGUiLCJ0eXBlVmVyc2lvbiI6MiwicG9zaXRpb24iOlsxNzAwLC0zMjBdLCJpZCI6IjczYTFjYmRmLTJiZDAtNGEyYy1hMDM3LTAyMWFiNDU4ZGNmNSIsIm5hbWUiOiJFdmFsdWF0ZSBTRUxMICMxIn0seyJwYXJhbWV0ZXJzIjp7ImNvbmRpdGlvbnMiOnsib3B0aW9ucyI6eyJjYXNlU2Vuc2l0aXZlIjp0cnVlLCJsZWZ0VmFsdWUiOiIiLCJ0eXBlVmFsaWRhdGlvbiI6InN0cmljdCIsInZlcnNpb24iOjJ9LCJjb25kaXRpb25zIjpbeyJpZCI6IjJiY2RkOTBhLTcxNzgtNDYwYy1iZWM0LWQ3Y2E5NDI4M2MzNyIsImxlZnRWYWx1ZSI6Ij17eyAkanNvbi5wYXNzIH19IiwicmlnaHRWYWx1ZSI6dHJ1ZSwib3BlcmF0b3IiOnsidHlwZSI6ImJvb2xlYW4iLCJvcGVyYXRpb24iOiJ0cnVlIiwic2luZ2xlVmFsdWUiOnRydWV9fV0sImNvbWJpbmF0b3IiOiJhbmQifSwib3B0aW9ucyI6e319LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuaWYiLCJ0eXBlVmVyc2lvbiI6Mi4yLCJwb3NpdGlvbiI6WzE5MzAsLTMyMF0sImlkIjoiMDc3ODZiMzktYTM4NS00ZGYxLThhYjMtYTM2NTk2NjM5OWE4IiwibmFtZSI6IlNFTEwgIzEgUGFzcz8ifSx7InBhcmFtZXRlcnMiOnsiYW1vdW50IjoyLCJ1bml0Ijoic2Vjb25kcyJ9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2Uud2FpdCIsInR5cGVWZXJzaW9uIjoxLjEsInBvc2l0aW9uIjpbMjE2MCwtMzYwXSwiaWQiOiI1NjY4YmVjNy0yYmIwLTRlN2QtYThmOS1mNmQ1ODAwY2M1NGEiLCJuYW1lIjoiV2FpdCAycyBTRUxMIn0seyJwYXJhbWV0ZXJzIjp7InVybCI6Imh0dHA6Ly9nYXRld2F5OjE1ODg4L2Nvbm5lY3RvcnMvanVwaXRlci9yb3V0ZXIvcXVvdGUtc3dhcCIsInNlbmRRdWVyeSI6dHJ1ZSwicXVlcnlQYXJhbWV0ZXJzIjp7InBhcmFtZXRlcnMiOlt7Im5hbWUiOiJuZXR3b3JrIiwidmFsdWUiOiJtYWlubmV0LWJldGEifSx7Im5hbWUiOiJiYXNlVG9rZW4iLCJ2YWx1ZSI6Ij17eyAkKCdQYXJzZSArIEF1dGhvcml6ZScpLmZpcnN0KCkuanNvbi5taW50IH19In0seyJuYW1lIjoicXVvdGVUb2tlbiIsInZhbHVlIjoiRVBqRldkZDVBdWZxU1NxZU0ycU4xeHp5YmFwQzhHNHdFR0drWnd5VER0MXYifSx7Im5hbWUiOiJhbW91bnQiLCJ2YWx1ZSI6Ij17eyAkKCdFdmFsdWF0ZSBTRUxMICMxJykuZmlyc3QoKS5qc29uLnRva2VuQW1vdW50IH19In0seyJuYW1lIjoic2lkZSIsInZhbHVlIjoiU0VMTCJ9LHsibmFtZSI6InNsaXBwYWdlUGN0IiwidmFsdWUiOiI9e3sgJCgnUGFyc2UgKyBBdXRob3JpemUnKS5maXJzdCgpLmpzb24uc2xpcHBhZ2VQY3QgfX0ifV19LCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5odHRwUmVxdWVzdCIsInR5cGVWZXJzaW9uIjo0LjIsInBvc2l0aW9uIjpbMjM5MCwtMzYwXSwiaWQiOiI1MzI2MzVmZi1lZWI1LTQxOGMtYWE4YS1kZjMzZWU3ODQyOWQiLCJuYW1lIjoiU0VMTCBRdW90ZSAjMiJ9LHsicGFyYW1ldGVycyI6eyJqc0NvZGUiOiJjb25zdCBjPSQoJ1BhcnNlICsgQXV0aG9yaXplJykuZmlyc3QoKS5qc29uLHE9JGpzb24sZmlyc3Q9JCgnRXZhbHVhdGUgU0VMTCAjMScpLmZpcnN0KCkuanNvbjtcbmNvbnN0IGFpPU51bWJlcihxLmFtb3VudEluKSxhbz1OdW1iZXIocS5hbW91bnRPdXQpLHA9KGFpPjAmJmFvPjApP2FvL2FpOm51bGw7XG5jb25zdCByYXdJbXBhY3Q9TnVtYmVyKHEucHJpY2VJbXBhY3RQY3QpLGltcGFjdFBjdD1OdW1iZXIuaXNGaW5pdGUocmF3SW1wYWN0KT9NYXRoLmFicyhyYXdJbXBhY3QpKjEwMDpudWxsO1xuY29uc3QgcHJpY2VPSz1OdW1iZXIuaXNGaW5pdGUocCkmJnA+PWMudGFyZ2V0O1xuY29uc3QgaW1wYWN0T0s9aW1wYWN0UGN0IT09bnVsbCYmaW1wYWN0UGN0PD1jLm1heFByaWNlSW1wYWN0UGN0O1xubGV0IHJlYXNvbj1udWxsO1xuaWYoIWZpcnN0LnBhc3MpcmVhc29uPWZpcnN0LnJlYXNvbnx8J1NFTEwgdmFsaWRhdGlvbiAjMSBmYWlsZWQnO1xuZWxzZSBpZighcHJpY2VPSylyZWFzb249J1NFTEwgdmFsaWRhdGlvbiAjMiBwcmljZSBpcyBiZWxvdyB0aGUgZmlyZWQgdGFyZ2V0JztcbmVsc2UgaWYoIWltcGFjdE9LKXJlYXNvbj1gU0VMTCB2YWxpZGF0aW9uICMyIHByaWNlIGltcGFjdCAke2ltcGFjdFBjdD09PW51bGw/J2ludmFsaWQnOmltcGFjdFBjdC50b0ZpeGVkKDIpKyclJ30gZXhjZWVkcyBjYXAgJHtjLm1heFByaWNlSW1wYWN0UGN0fSVgO1xucmV0dXJuIFt7anNvbjp7Li4uYyx0b2tlbkFtb3VudDpmaXJzdC50b2tlbkFtb3VudCxzY2VuYXJpb0ltcGFjdFBlcmNlbnQ6Zmlyc3Quc2NlbmFyaW9JbXBhY3RQZXJjZW50LFxuIHByaWNlMTpmaXJzdC5wcmljZTEsaW1wYWN0MVBlcmNlbnQ6Zmlyc3QuaW1wYWN0MVBlcmNlbnQscHJpY2UyOnAsaW1wYWN0MlBlcmNlbnQ6aW1wYWN0UGN0LFxuIHBhc3M6Zmlyc3QucGFzcyYmcHJpY2VPSyYmaW1wYWN0T0sscmVhc29ufX1dOyJ9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuY29kZSIsInR5cGVWZXJzaW9uIjoyLCJwb3NpdGlvbiI6WzI2MjAsLTM2MF0sImlkIjoiZmZmYTFjM2MtNDFjOS00N2JjLWE3OGItMmI1NzBlYjcxY2Y2IiwibmFtZSI6IkV2YWx1YXRlIFNFTEwgIzIifSx7InBhcmFtZXRlcnMiOnsiY29uZGl0aW9ucyI6eyJvcHRpb25zIjp7ImNhc2VTZW5zaXRpdmUiOnRydWUsImxlZnRWYWx1ZSI6IiIsInR5cGVWYWxpZGF0aW9uIjoic3RyaWN0IiwidmVyc2lvbiI6Mn0sImNvbmRpdGlvbnMiOlt7ImlkIjoiYmIzNWI1YjEtMTc0Ny00N2NhLWI4NmUtNTkyZDgxMjA2YmMzIiwibGVmdFZhbHVlIjoiPXt7ICRqc29uLnBhc3MgfX0iLCJyaWdodFZhbHVlIjp0cnVlLCJvcGVyYXRvciI6eyJ0eXBlIjoiYm9vbGVhbiIsIm9wZXJhdGlvbiI6InRydWUiLCJzaW5nbGVWYWx1ZSI6dHJ1ZX19XSwiY29tYmluYXRvciI6ImFuZCJ9LCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5pZiIsInR5cGVWZXJzaW9uIjoyLjIsInBvc2l0aW9uIjpbMjg1MCwtMzYwXSwiaWQiOiIyYWU2MWRjYy0wMThiLTRlZGEtYjFiMi1mODJlMzVhZjBjNzQiLCJuYW1lIjoiU0VMTCAjMiBQYXNzPyJ9LHsicGFyYW1ldGVycyI6eyJ1cmwiOiJodHRwOi8vaG9zdC5kb2NrZXIuaW50ZXJuYWw6ODAwMC9hcGkvdG9rZW5zIiwib3B0aW9ucyI6e319LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuaHR0cFJlcXVlc3QiLCJ0eXBlVmVyc2lvbiI6NC4yLCJwb3NpdGlvbiI6WzI2MjAsMjBdLCJpZCI6IjY5MGY4YTk4LTliZTYtNDBlNi1iZDBhLTg2YmJkMDY1OTkxNyIsIm5hbWUiOiJCVVkgRmluYWwgQXBwIFN0YXRlIn0seyJwYXJhbWV0ZXJzIjp7InVybCI6Imh0dHA6Ly90cmFkaW5nLWNvbnRyb2xsZXI6ODA4MC9pbnRlcm5hbC9zdGF0ZSIsIm9wdGlvbnMiOnt9fSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmh0dHBSZXF1ZXN0IiwidHlwZVZlcnNpb24iOjQuMiwicG9zaXRpb24iOlsyODUwLDIwXSwiaWQiOiI1ZDEzYjAyMC0zOGEwLTQwODYtOWVjNi04ZWEyNjZkZTAzOGYiLCJuYW1lIjoiQlVZIEZpbmFsIENvbnRyb2xsZXIgU3RhdGUifSx7InBhcmFtZXRlcnMiOnsibWV0aG9kIjoiUE9TVCIsInVybCI6Imh0dHA6Ly90cmFkaW5nLWNvbnRyb2xsZXI6ODA4MC9pbnRlcm5hbC9iYWxhbmNlcyIsInNlbmRIZWFkZXJzIjp0cnVlLCJoZWFkZXJQYXJhbWV0ZXJzIjp7InBhcmFtZXRlcnMiOlt7Im5hbWUiOiJDb250ZW50LVR5cGUiLCJ2YWx1ZSI6ImFwcGxpY2F0aW9uL2pzb24ifV19LCJzZW5kQm9keSI6dHJ1ZSwiY29udGVudFR5cGUiOiJyYXciLCJyYXdDb250ZW50VHlwZSI6ImFwcGxpY2F0aW9uL2pzb24iLCJib2R5IjoiPXt7IEpTT04uc3RyaW5naWZ5KHttaW50OiQoJ1BhcnNlICsgQXV0aG9yaXplJykuZmlyc3QoKS5qc29uLm1pbnQsbmFtZTokKCdQYXJzZSArIEF1dGhvcml6ZScpLmZpcnN0KCkuanNvbi5uYW1lfSkgfX0iLCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5odHRwUmVxdWVzdCIsInR5cGVWZXJzaW9uIjo0LjIsInBvc2l0aW9uIjpbMzA4MCwyMF0sImlkIjoiOGIyNDdmMjktZGY4MC00MWVkLTk4OGYtNmQyNWZkZDJlMWIyIiwibmFtZSI6IkJVWSBXYWxsZXQgQmFsYW5jZXMifSx7InBhcmFtZXRlcnMiOnsiYW1vdW50IjoyLCJ1bml0Ijoic2Vjb25kcyJ9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2Uud2FpdCIsInR5cGVWZXJzaW9uIjoxLjEsInBvc2l0aW9uIjpbMzMxMCwyMF0sImlkIjoiMTc0NzUyYzctYjRkOS00YzI2LTg3NDktMGRlNmY1ZTMzOWQxIiwibmFtZSI6IkJVWSBXYWl0IDJzIEZpbmFsIn0seyJwYXJhbWV0ZXJzIjp7InVybCI6Imh0dHA6Ly9nYXRld2F5OjE1ODg4L2Nvbm5lY3RvcnMvanVwaXRlci9yb3V0ZXIvcXVvdGUtc3dhcCIsInNlbmRRdWVyeSI6dHJ1ZSwicXVlcnlQYXJhbWV0ZXJzIjp7InBhcmFtZXRlcnMiOlt7Im5hbWUiOiJuZXR3b3JrIiwidmFsdWUiOiJtYWlubmV0LWJldGEifSx7Im5hbWUiOiJiYXNlVG9rZW4iLCJ2YWx1ZSI6IkVQakZXZGQ1QXVmcVNTcWVNMnFOMXh6eWJhcEM4RzR3RUdHa1p3eVREdDF2In0seyJuYW1lIjoicXVvdGVUb2tlbiIsInZhbHVlIjoiPXt7ICQoJ1BhcnNlICsgQXV0aG9yaXplJykuZmlyc3QoKS5qc29uLm1pbnQgfX0ifSx7Im5hbWUiOiJhbW91bnQiLCJ2YWx1ZSI6Ij17eyAkKCdQYXJzZSArIEF1dGhvcml6ZScpLmZpcnN0KCkuanNvbi51c2RBbW91bnQgfX0ifSx7Im5hbWUiOiJzaWRlIiwidmFsdWUiOiJTRUxMIn0seyJuYW1lIjoic2xpcHBhZ2VQY3QiLCJ2YWx1ZSI6Ij17eyAkKCdQYXJzZSArIEF1dGhvcml6ZScpLmZpcnN0KCkuanNvbi5zbGlwcGFnZVBjdCB9fSJ9XX0sIm9wdGlvbnMiOnt9fSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmh0dHBSZXF1ZXN0IiwidHlwZVZlcnNpb24iOjQuMiwicG9zaXRpb24iOlszNTQwLDIwXSwiaWQiOiJiYWNlODgwMC04MDk1LTRiMzgtYjFmOC03ZDdlNTQ1NDc4N2MiLCJuYW1lIjoiQlVZIEZJTkFMIEV4ZWN1dGFibGUgUXVvdGUifSx7InBhcmFtZXRlcnMiOnsianNDb2RlIjoiY29uc3QgYz0kKCdQYXJzZSArIEF1dGhvcml6ZScpLmZpcnN0KCkuanNvbjtcbmNvbnN0IGFwaT0kKCdCVVkgRmluYWwgQXBwIFN0YXRlJykuZmlyc3QoKS5qc29uPz97fTtcbmNvbnN0IHN0PSQoJ0JVWSBGaW5hbCBDb250cm9sbGVyIFN0YXRlJykuZmlyc3QoKS5qc29uPy5zdGF0ZT8/e307XG5jb25zdCBiYWw9JCgnQlVZIFdhbGxldCBCYWxhbmNlcycpLmZpcnN0KCkuanNvbj8/e307XG5jb25zdCBxPSRqc29uO1xuY29uc3QgdG9rZW49KGFwaS50b2tlbnN8fFtdKS5maW5kKHQ9PnQubWludD09PWMubWludCk7XG5jb25zdCBzdW1tYXJ5PShhcGkuc3VtbWFyaWVzfHxbXSkuZmluZChzPT5zLm1pbnQ9PT1jLm1pbnQpfHx7fTtcbmNvbnN0IHRjPXN0LnRva2Vucz8uW2MubWludF18fHthdXRvQnV5OmZhbHNlLGF1dG9TZWxsOmZhbHNlLHdhbGxldDpudWxsfTtcbmNvbnN0IGFzc2lnbmVkTm93PXRjLndhbGxldHx8bnVsbDtcbmNvbnN0IGFzc2lnbm1lbnRTdGFibGU9YXNzaWduZWROb3c9PT0oYy5hc3NpZ25lZFdhbGxldHx8bnVsbCk7XG5jb25zdCBhbGVydHM9Yy5kaXJlY3Rpb249PT0nQlVZJz8odG9rZW4/LmJ1eV9hbGVydHN8fFtdKToodG9rZW4/LnNlbGxfYWxlcnRzfHxbXSk7XG5jb25zdCB0YXJnZXRPSz1hbGVydHMuc29tZSh2PT5NYXRoLmFicyhOdW1iZXIodiktYy50YXJnZXQpPD1NYXRoLm1heCgxZS0xMixNYXRoLmFicyhjLnRhcmdldCkqMWUtOSkpO1xuY29uc3QgY29uZmlnT0s9dG9rZW4/LmVuYWJsZWQ9PT10cnVlJiZ0YXJnZXRPSyYmTWF0aC5hYnMoTnVtYmVyKHRva2VuPy51c2RfYW1vdW50KS1jLnVzZEFtb3VudCk8PU1hdGgubWF4KDFlLTksTWF0aC5hYnMoYy51c2RBbW91bnQpKjFlLTkpO1xuY29uc3QgY29udHJvbHNPSz1zdC5tYXN0ZXI9PT10cnVlJiYhc3Quc2FmZXR5TG9jayYmKChjLmRpcmVjdGlvbj09PSdCVVknJiZ0Yy5hdXRvQnV5PT09dHJ1ZSl8fChjLmRpcmVjdGlvbj09PSdTRUxMJyYmdGMuYXV0b1NlbGw9PT10cnVlKSk7XG5jb25zdCBjdXJyZW50VG9waWM9U3RyaW5nKHN1bW1hcnkubnRmeV9lZmZlY3RpdmVfdG9waWN8fHRva2VuPy5udGZ5X3RvcGljfHwnJyk7XG5jb25zdCB0b3BpY1N0YWJsZT1jdXJyZW50VG9waWM9PT1jLnRvcGljO1xuY29uc3QgYWk9TnVtYmVyKHEuYW1vdW50SW4pLGFvPU51bWJlcihxLmFtb3VudE91dCk7XG5jb25zdCBwcmljZT1jLmRpcmVjdGlvbj09PSdCVVknPyhhaT4wJiZhbz4wP2FpL2FvOm51bGwpOihhaT4wJiZhbz4wP2FvL2FpOm51bGwpO1xuY29uc3QgcHJpY2VPSz1OdW1iZXIuaXNGaW5pdGUocHJpY2UpJiYoYy5kaXJlY3Rpb249PT0nQlVZJz9wcmljZTw9Yy50YXJnZXQ6cHJpY2U+PWMudGFyZ2V0KTtcbmNvbnN0IHJhd0ltcGFjdD1OdW1iZXIocS5wcmljZUltcGFjdFBjdCksaW1wYWN0UGN0PU51bWJlci5pc0Zpbml0ZShyYXdJbXBhY3QpP01hdGguYWJzKHJhd0ltcGFjdCkqMTAwOm51bGw7XG5jb25zdCBtYXhJbXBhY3Q9TnVtYmVyKHN0Lm1heFByaWNlSW1wYWN0UGN0fHxjLm1heFByaWNlSW1wYWN0UGN0fHwyKTtcbmNvbnN0IGltcGFjdE9LPWltcGFjdFBjdCE9PW51bGwmJmltcGFjdFBjdDw9bWF4SW1wYWN0O1xuY29uc3QgdHJhZGVDYXA9TnVtYmVyKHN0Lm1heFRyYWRlVVNEQ3x8Yy5tYXhUcmFkZVVTREN8fDUwMCk7XG5jb25zdCB0cmFkZUNhcE9LPU51bWJlcihjLnVzZEFtb3VudCk+MCYmTnVtYmVyKGMudXNkQW1vdW50KTw9dHJhZGVDYXA7XG5jb25zdCB3YWxsZXRBc3NpZ25lZD1iYWwuYXNzaWduZWQ9PT10cnVlO1xuY29uc3Qgd2FsbGV0Q29uZmlndXJlZD1iYWwuY29uZmlndXJlZD09PXRydWU7XG5jb25zdCB3YWxsZXRNYXRjaGVzPSF3YWxsZXRBc3NpZ25lZHx8KGJhbC53YWxsZXQ9PT1hc3NpZ25lZE5vdyYmYXNzaWdubWVudFN0YWJsZSk7XG5jb25zdCBiYWNrdXBPSz1zdC5tb2RlPT09J3Rlc3RpbmcnfHwod2FsbGV0Q29uZmlndXJlZCYmYmFsLmJhY2t1cENvbmZpcm1lZD09PXRydWUpO1xuY29uc3QgYmFsYW5jZU9LPSF3YWxsZXRBc3NpZ25lZFxuICA/IHN0Lm1vZGU9PT0ndGVzdGluZydcbiAgOiB3YWxsZXRDb25maWd1cmVkJiZOdW1iZXIoYmFsLnNvbCk+PU51bWJlcihzdC5taW5Tb2xSZXNlcnZlKSYmXG4gICAgKGMuZGlyZWN0aW9uPT09J0JVWSc/TnVtYmVyKGJhbC51c2RjKSsxZS05Pj1haTpOdW1iZXIoYmFsLnRva2VuKSsxZS05Pj1haSk7XG5sZXQgcmVhc29uPW51bGw7XG5pZighY29uZmlnT0spcmVhc29uPSdhcHAgdG9rZW4vdGFyZ2V0L1VTREMgc2NlbmFyaW8gY2hhbmdlZCBkdXJpbmcgdmFsaWRhdGlvbic7XG5lbHNlIGlmKCFjb250cm9sc09LKXJlYXNvbj0nTUFTVEVSL2NvaW4gY29udHJvbC9zYWZldHkgbG9jayBjaGFuZ2VkIGR1cmluZyB2YWxpZGF0aW9uJztcbmVsc2UgaWYoIXRvcGljU3RhYmxlKXJlYXNvbj0nZWZmZWN0aXZlIG50ZnkgdG9waWMgY2hhbmdlZCBkdXJpbmcgdmFsaWRhdGlvbic7XG5lbHNlIGlmKCF0cmFkZUNhcE9LKXJlYXNvbj1gVVNEQyBzY2VuYXJpbyAke2MudXNkQW1vdW50fSBleGNlZWRzIG1heCB0cmFkZSBjYXAgJHt0cmFkZUNhcH1gO1xuZWxzZSBpZighYXNzaWdubWVudFN0YWJsZSlyZWFzb249J2NvaW4gdHJhZGluZy13YWxsZXQgYXNzaWdubWVudCBjaGFuZ2VkIGR1cmluZyB2YWxpZGF0aW9uJztcbmVsc2UgaWYoIXdhbGxldE1hdGNoZXMpcmVhc29uPSdiYWxhbmNlIHJlc3BvbnNlIGRvZXMgbm90IG1hdGNoIHRoZSBjb2luIGFzc2lnbmVkIHdhbGxldCc7XG5lbHNlIGlmKHN0Lm1vZGU9PT0ndHJhZGluZycmJiF3YWxsZXRBc3NpZ25lZClyZWFzb249J25vIHRyYWRpbmcgd2FsbGV0IGlzIGFzc2lnbmVkIHRvIHRoaXMgY29pbic7XG5lbHNlIGlmKHdhbGxldEFzc2lnbmVkJiYhd2FsbGV0Q29uZmlndXJlZClyZWFzb249J2Fzc2lnbmVkIHRyYWRpbmcgd2FsbGV0IGlzIHVuYXZhaWxhYmxlIGluIEdhdGV3YXknO1xuZWxzZSBpZighYmFja3VwT0spcmVhc29uPSdhc3NpZ25lZCB0cmFkaW5nIHdhbGxldCByZWNvdmVyeSBiYWNrdXAgaXMgbm90IGNvbmZpcm1lZCc7XG5lbHNlIGlmKCFwcmljZU9LKXJlYXNvbj0nZmluYWwgZXhlY3V0YWJsZSBxdW90ZSBubyBsb25nZXIgbWVldHMgZmlyZWQgdGFyZ2V0JztcbmVsc2UgaWYoIWltcGFjdE9LKXJlYXNvbj1gZmluYWwgZXhlY3V0YWJsZSBxdW90ZSBpbXBhY3QgJHtpbXBhY3RQY3Q9PT1udWxsPydpbnZhbGlkJzppbXBhY3RQY3QudG9GaXhlZCgyKSsnJSd9IGV4Y2VlZHMgY2FwICR7bWF4SW1wYWN0fSVgO1xuZWxzZSBpZighYmFsYW5jZU9LKXJlYXNvbj0nYXNzaWduZWQgd2FsbGV0IGJhbGFuY2Ugb3IgU09MIHJlc2VydmUgaXMgaW5zdWZmaWNpZW50JztcbmNvbnN0IHBhc3M9IXJlYXNvbjtcbnJldHVybiBbe2pzb246ey4uLmMsbW9kZTpzdC5tb2RlfHwndGVzdGluZycscGFzcyxyZWFzb24sXG4gZmluYWxQcmljZTpwcmljZSxxdW90ZUlkOnEucXVvdGVJZCx0b2tlbkluOnEudG9rZW5Jbix0b2tlbk91dDpxLnRva2VuT3V0LFxuIGFtb3VudEluOmFpLGFtb3VudE91dDphbyxwcmljZUltcGFjdFBjdDpyYXdJbXBhY3QscHJpY2VJbXBhY3RQZXJjZW50OmltcGFjdFBjdCxtYXhQcmljZUltcGFjdFBjdDptYXhJbXBhY3QsbWF4VHJhZGVVU0RDOnRyYWRlQ2FwLFxuIGFzc2lnbmVkV2FsbGV0OmFzc2lnbmVkTm93LHdhbGxldEFzc2lnbmVkLHdhbGxldENvbmZpZ3VyZWQsd2FsbGV0Tmlja25hbWU6YmFsLndhbGxldE5pY2tuYW1lfHxudWxsLGJhbGFuY2VzOmJhbCxcbiB0b2tlbkFtb3VudDpjLmRpcmVjdGlvbj09PSdTRUxMJz9haTpudWxsLFxuIGV4ZWN1dGlvbl9jYXBhYmxlOnN0Lm1vZGU9PT0ndHJhZGluZydcbn19XTsifSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmNvZGUiLCJ0eXBlVmVyc2lvbiI6MiwicG9zaXRpb24iOlszNzcwLDIwXSwiaWQiOiJmNThmNGVhYi0zMGNlLTQ2ZDEtYmJiNi1lMWFjNWNhODcyNDEiLCJuYW1lIjoiQlVZIEZpbmFsIFNhZmV0eSBFdmFsdWF0aW9uIn0seyJwYXJhbWV0ZXJzIjp7ImNvbmRpdGlvbnMiOnsib3B0aW9ucyI6eyJjYXNlU2Vuc2l0aXZlIjp0cnVlLCJsZWZ0VmFsdWUiOiIiLCJ0eXBlVmFsaWRhdGlvbiI6InN0cmljdCIsInZlcnNpb24iOjJ9LCJjb25kaXRpb25zIjpbeyJpZCI6IjhjY2ZjMjZmLTI1ZTItNDEzMi1iZmUzLWNhMzVkNDcxM2IxNCIsImxlZnRWYWx1ZSI6Ij17eyAkanNvbi5wYXNzIH19IiwicmlnaHRWYWx1ZSI6dHJ1ZSwib3BlcmF0b3IiOnsidHlwZSI6ImJvb2xlYW4iLCJvcGVyYXRpb24iOiJ0cnVlIiwic2luZ2xlVmFsdWUiOnRydWV9fV0sImNvbWJpbmF0b3IiOiJhbmQifSwib3B0aW9ucyI6e319LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuaWYiLCJ0eXBlVmVyc2lvbiI6Mi4yLCJwb3NpdGlvbiI6WzQwMDAsMjBdLCJpZCI6ImFhNTQ5YzVmLWE4N2MtNDZmYi1hY2IwLTFkMjI2Y2ZhZTExMSIsIm5hbWUiOiJCVVkgRmluYWwgUGFzcz8ifSx7InBhcmFtZXRlcnMiOnsiY29uZGl0aW9ucyI6eyJvcHRpb25zIjp7ImNhc2VTZW5zaXRpdmUiOnRydWUsImxlZnRWYWx1ZSI6IiIsInR5cGVWYWxpZGF0aW9uIjoic3RyaWN0IiwidmVyc2lvbiI6Mn0sImNvbmRpdGlvbnMiOlt7ImlkIjoiMzhhYWEyYmEtOTZhYy00ODRmLWI4MjAtYzdhMTQ2YzQ1NGRlIiwibGVmdFZhbHVlIjoiPXt7ICRqc29uLm1vZGUgfX0iLCJyaWdodFZhbHVlIjoidHJhZGluZyIsIm9wZXJhdG9yIjp7InR5cGUiOiJzdHJpbmciLCJvcGVyYXRpb24iOiJlcXVhbHMifX1dLCJjb21iaW5hdG9yIjoiYW5kIn0sIm9wdGlvbnMiOnt9fSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmlmIiwidHlwZVZlcnNpb24iOjIuMiwicG9zaXRpb24iOls0MjMwLC0zMF0sImlkIjoiNDE4NTliZmQtYTJlZi00NDcxLWEwOGItOWI4Y2Y5NjlhOWE1IiwibmFtZSI6IkJVWSBUcmFkaW5nIE1vZGU/In0seyJwYXJhbWV0ZXJzIjp7ImpzQ29kZSI6InJldHVybiBbe2pzb246e2RlY2lzaW9uOidXT1VMRF9UUkFERScsbW9kZTonVEVTVElORycsdG9rZW46JGpzb24ubmFtZSxtaW50OiRqc29uLm1pbnQsZGlyZWN0aW9uOiRqc29uLmRpcmVjdGlvbix0YXJnZXQ6JGpzb24udGFyZ2V0LGZpbmFsUHJpY2U6JGpzb24uZmluYWxQcmljZSxhbW91bnRJbjokanNvbi5hbW91bnRJbixhbW91bnRPdXQ6JGpzb24uYW1vdW50T3V0LHByaWNlSW1wYWN0UGVyY2VudDokanNvbi5wcmljZUltcGFjdFBlcmNlbnQsbWF4UHJpY2VJbXBhY3RQY3Q6JGpzb24ubWF4UHJpY2VJbXBhY3RQY3QsbWF4VHJhZGVVU0RDOiRqc29uLm1heFRyYWRlVVNEQyxhc3NpZ25lZFdhbGxldDokanNvbi5hc3NpZ25lZFdhbGxldCx3YWxsZXROaWNrbmFtZTokanNvbi53YWxsZXROaWNrbmFtZSxiYWxhbmNlczokanNvbi5iYWxhbmNlcyxleGVjdXRpb246J0JMT0NLRUQgQlkgVEVTVElORyBNT0RFJ319XTsifSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmNvZGUiLCJ0eXBlVmVyc2lvbiI6MiwicG9zaXRpb24iOls0NDYwLDkwXSwiaWQiOiI5Mjc4MTA5YS02M2YzLTRhZTQtYWU5NC02ZTgwODFkMjM5ODUiLCJuYW1lIjoiQlVZIFdPVUxEIFRSQURFIChUZXN0aW5nKSJ9LHsicGFyYW1ldGVycyI6eyJtZXRob2QiOiJQT1NUIiwidXJsIjoiaHR0cDovL3RyYWRpbmctY29udHJvbGxlcjo4MDgwL2ludGVybmFsL3RyYWRlL2V4ZWN1dGUiLCJzZW5kSGVhZGVycyI6dHJ1ZSwiaGVhZGVyUGFyYW1ldGVycyI6eyJwYXJhbWV0ZXJzIjpbeyJuYW1lIjoiQ29udGVudC1UeXBlIiwidmFsdWUiOiJhcHBsaWNhdGlvbi9qc29uIn1dfSwic2VuZEJvZHkiOnRydWUsImNvbnRlbnRUeXBlIjoicmF3IiwicmF3Q29udGVudFR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIiwiYm9keSI6Ij17eyBKU09OLnN0cmluZ2lmeSh7YWxlcnRJZDokanNvbi5hbGVydElkLG5hbWU6JGpzb24ubmFtZSxtaW50OiRqc29uLm1pbnQsZGlyZWN0aW9uOiRqc29uLmRpcmVjdGlvbix0YXJnZXQ6JGpzb24udGFyZ2V0LHVzZEFtb3VudDokanNvbi51c2RBbW91bnQsdG9rZW5BbW91bnQ6JGpzb24udG9rZW5BbW91bnQsYXNzaWduZWRXYWxsZXQ6JGpzb24uYXNzaWduZWRXYWxsZXQsdG9waWM6JGpzb24udG9waWMscXVvdGU6e3F1b3RlSWQ6JGpzb24ucXVvdGVJZCx0b2tlbkluOiRqc29uLnRva2VuSW4sdG9rZW5PdXQ6JGpzb24udG9rZW5PdXQsYW1vdW50SW46JGpzb24uYW1vdW50SW4sYW1vdW50T3V0OiRqc29uLmFtb3VudE91dCxwcmljZUltcGFjdFBjdDokanNvbi5wcmljZUltcGFjdFBjdH0gfSkgfX0iLCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5odHRwUmVxdWVzdCIsInR5cGVWZXJzaW9uIjo0LjIsInBvc2l0aW9uIjpbNDQ2MCwtODBdLCJpZCI6IjU2OGMyYzY0LWZiYTctNGRkOS1iOGRhLWM4OTJiNzM3NmU3OCIsIm5hbWUiOiJCVVkgRXhlY3V0ZSB2aWEgQ29udHJvbGxlciJ9LHsicGFyYW1ldGVycyI6eyJqc0NvZGUiOiJcbmNvbnN0IHQ9JGpzb24udHJhZGV8fHt9O1xubGV0IGRlY2lzaW9uPSdUUkFERV9SRVNVTFQnO1xuaWYodC5zdGF0dXM9PT0nQ09ORklSTUVEJylkZWNpc2lvbj0nVFJBREVfQ09ORklSTUVEJztcbmVsc2UgaWYodC5zdGF0dXM9PT0nRkFJTEVEJylkZWNpc2lvbj0nVFJBREVfRkFJTEVEJztcbmVsc2UgaWYodC5zdGF0dXM9PT0nVU5DRVJUQUlOJ3x8dC5zdGF0dXM9PT0nUEVORElORycpZGVjaXNpb249J1RSQURFX1VOQ0VSVEFJTic7XG5lbHNlIGlmKHQuc3RhdHVzPT09J0JVUlNUX1NVUFBSRVNTRUQnKWRlY2lzaW9uPSdCVVJTVF9TVVBQUkVTU0VEJztcbmVsc2UgaWYodC5zdGF0dXM9PT0nVFJJR0dFUl9HVUFSRF9TVVBQUkVTU0VEJylkZWNpc2lvbj0nVFJJR0dFUl9HVUFSRF9TVVBQUkVTU0VEJztcbnJldHVybiBbe2pzb246e2RlY2lzaW9uLG1vZGU6J1RSQURJTkcnLHRyYWRlOnR9fV07XG4ifSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmNvZGUiLCJ0eXBlVmVyc2lvbiI6MiwicG9zaXRpb24iOls0NjkwLC04MF0sImlkIjoiZDdlYjczNTAtNGU2ZS00Y2U3LWFhNjEtOTY4YzE5MmVhOGQyIiwibmFtZSI6IkJVWSBGb3JtYXQgVHJhZGUgUmVzdWx0In0seyJwYXJhbWV0ZXJzIjp7ImpzQ29kZSI6InJldHVybiBbe2pzb246e2RlY2lzaW9uOidBQk9SVEVEJyxyZWFzb246JGpzb24ucmVhc29uLHRva2VuOiRqc29uLm5hbWUsbWludDokanNvbi5taW50LGRpcmVjdGlvbjokanNvbi5kaXJlY3Rpb24sdGFyZ2V0OiRqc29uLnRhcmdldCxtb2RlOiRqc29uLm1vZGUsZXhlY3V0aW9uOidOT05FJ319XTsifSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmNvZGUiLCJ0eXBlVmVyc2lvbiI6MiwicG9zaXRpb24iOls0MjMwLDE3MF0sImlkIjoiNjc4OTQzN2YtN2UzNi00NTgyLWJmZDQtZTEwMGZhMjJlOGViIiwibmFtZSI6IkJVWSBBYm9ydCBGaW5hbCJ9LHsicGFyYW1ldGVycyI6eyJ1cmwiOiJodHRwOi8vaG9zdC5kb2NrZXIuaW50ZXJuYWw6ODAwMC9hcGkvdG9rZW5zIiwib3B0aW9ucyI6e319LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuaHR0cFJlcXVlc3QiLCJ0eXBlVmVyc2lvbiI6NC4yLCJwb3NpdGlvbiI6WzMwODAsLTM2MF0sImlkIjoiYTYzZTNhY2MtZmVjYy00NDMxLWEzNDgtOTNkOTljODI2ZjUxIiwibmFtZSI6IlNFTEwgRmluYWwgQXBwIFN0YXRlIn0seyJwYXJhbWV0ZXJzIjp7InVybCI6Imh0dHA6Ly90cmFkaW5nLWNvbnRyb2xsZXI6ODA4MC9pbnRlcm5hbC9zdGF0ZSIsIm9wdGlvbnMiOnt9fSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmh0dHBSZXF1ZXN0IiwidHlwZVZlcnNpb24iOjQuMiwicG9zaXRpb24iOlszMzEwLC0zNjBdLCJpZCI6IjY5OGViOTg5LTA2ZGEtNDc0OS05ZWMzLTlmYWUzNjNmZjc3MyIsIm5hbWUiOiJTRUxMIEZpbmFsIENvbnRyb2xsZXIgU3RhdGUifSx7InBhcmFtZXRlcnMiOnsibWV0aG9kIjoiUE9TVCIsInVybCI6Imh0dHA6Ly90cmFkaW5nLWNvbnRyb2xsZXI6ODA4MC9pbnRlcm5hbC9iYWxhbmNlcyIsInNlbmRIZWFkZXJzIjp0cnVlLCJoZWFkZXJQYXJhbWV0ZXJzIjp7InBhcmFtZXRlcnMiOlt7Im5hbWUiOiJDb250ZW50LVR5cGUiLCJ2YWx1ZSI6ImFwcGxpY2F0aW9uL2pzb24ifV19LCJzZW5kQm9keSI6dHJ1ZSwiY29udGVudFR5cGUiOiJyYXciLCJyYXdDb250ZW50VHlwZSI6ImFwcGxpY2F0aW9uL2pzb24iLCJib2R5IjoiPXt7IEpTT04uc3RyaW5naWZ5KHttaW50OiQoJ1BhcnNlICsgQXV0aG9yaXplJykuZmlyc3QoKS5qc29uLm1pbnQsbmFtZTokKCdQYXJzZSArIEF1dGhvcml6ZScpLmZpcnN0KCkuanNvbi5uYW1lfSkgfX0iLCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5odHRwUmVxdWVzdCIsInR5cGVWZXJzaW9uIjo0LjIsInBvc2l0aW9uIjpbMzU0MCwtMzYwXSwiaWQiOiI1OWMwMTJkOS04ODVkLTQ3YjktYWVmNy04NTFlNzUyZTA2NTYiLCJuYW1lIjoiU0VMTCBXYWxsZXQgQmFsYW5jZXMifSx7InBhcmFtZXRlcnMiOnsiYW1vdW50IjoyLCJ1bml0Ijoic2Vjb25kcyJ9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2Uud2FpdCIsInR5cGVWZXJzaW9uIjoxLjEsInBvc2l0aW9uIjpbMzc3MCwtMzYwXSwiaWQiOiJkZjhlM2Q2NC1mNjYxLTQyN2ItYWZmOC03OWRiZjExNmU5ZDQiLCJuYW1lIjoiU0VMTCBXYWl0IDJzIEZpbmFsIn0seyJwYXJhbWV0ZXJzIjp7InVybCI6Imh0dHA6Ly9nYXRld2F5OjE1ODg4L2Nvbm5lY3RvcnMvanVwaXRlci9yb3V0ZXIvcXVvdGUtc3dhcCIsInNlbmRRdWVyeSI6dHJ1ZSwicXVlcnlQYXJhbWV0ZXJzIjp7InBhcmFtZXRlcnMiOlt7Im5hbWUiOiJuZXR3b3JrIiwidmFsdWUiOiJtYWlubmV0LWJldGEifSx7Im5hbWUiOiJiYXNlVG9rZW4iLCJ2YWx1ZSI6Ij17eyAkKCdQYXJzZSArIEF1dGhvcml6ZScpLmZpcnN0KCkuanNvbi5taW50IH19In0seyJuYW1lIjoicXVvdGVUb2tlbiIsInZhbHVlIjoiRVBqRldkZDVBdWZxU1NxZU0ycU4xeHp5YmFwQzhHNHdFR0drWnd5VER0MXYifSx7Im5hbWUiOiJhbW91bnQiLCJ2YWx1ZSI6Ij17eyAkKCdFdmFsdWF0ZSBTRUxMICMxJykuZmlyc3QoKS5qc29uLnRva2VuQW1vdW50IH19In0seyJuYW1lIjoic2lkZSIsInZhbHVlIjoiU0VMTCJ9LHsibmFtZSI6InNsaXBwYWdlUGN0IiwidmFsdWUiOiI9e3sgJCgnUGFyc2UgKyBBdXRob3JpemUnKS5maXJzdCgpLmpzb24uc2xpcHBhZ2VQY3QgfX0ifV19LCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5odHRwUmVxdWVzdCIsInR5cGVWZXJzaW9uIjo0LjIsInBvc2l0aW9uIjpbNDAwMCwtMzYwXSwiaWQiOiJiMTAyYjFhMy1jNTAyLTQzMzAtOTBkNy0zMjhiMDA1NGMxODkiLCJuYW1lIjoiU0VMTCBGSU5BTCBFeGVjdXRhYmxlIFF1b3RlIn0seyJwYXJhbWV0ZXJzIjp7ImpzQ29kZSI6ImNvbnN0IGM9JCgnUGFyc2UgKyBBdXRob3JpemUnKS5maXJzdCgpLmpzb247XG5jb25zdCBhcGk9JCgnU0VMTCBGaW5hbCBBcHAgU3RhdGUnKS5maXJzdCgpLmpzb24/P3t9O1xuY29uc3Qgc3Q9JCgnU0VMTCBGaW5hbCBDb250cm9sbGVyIFN0YXRlJykuZmlyc3QoKS5qc29uPy5zdGF0ZT8/e307XG5jb25zdCBiYWw9JCgnU0VMTCBXYWxsZXQgQmFsYW5jZXMnKS5maXJzdCgpLmpzb24/P3t9O1xuY29uc3QgcT0kanNvbjtcbmNvbnN0IHRva2VuPShhcGkudG9rZW5zfHxbXSkuZmluZCh0PT50Lm1pbnQ9PT1jLm1pbnQpO1xuY29uc3Qgc3VtbWFyeT0oYXBpLnN1bW1hcmllc3x8W10pLmZpbmQocz0+cy5taW50PT09Yy5taW50KXx8e307XG5jb25zdCB0Yz1zdC50b2tlbnM/LltjLm1pbnRdfHx7YXV0b0J1eTpmYWxzZSxhdXRvU2VsbDpmYWxzZSx3YWxsZXQ6bnVsbH07XG5jb25zdCBhc3NpZ25lZE5vdz10Yy53YWxsZXR8fG51bGw7XG5jb25zdCBhc3NpZ25tZW50U3RhYmxlPWFzc2lnbmVkTm93PT09KGMuYXNzaWduZWRXYWxsZXR8fG51bGwpO1xuY29uc3QgYWxlcnRzPWMuZGlyZWN0aW9uPT09J0JVWSc/KHRva2VuPy5idXlfYWxlcnRzfHxbXSk6KHRva2VuPy5zZWxsX2FsZXJ0c3x8W10pO1xuY29uc3QgdGFyZ2V0T0s9YWxlcnRzLnNvbWUodj0+TWF0aC5hYnMoTnVtYmVyKHYpLWMudGFyZ2V0KTw9TWF0aC5tYXgoMWUtMTIsTWF0aC5hYnMoYy50YXJnZXQpKjFlLTkpKTtcbmNvbnN0IGNvbmZpZ09LPXRva2VuPy5lbmFibGVkPT09dHJ1ZSYmdGFyZ2V0T0smJk1hdGguYWJzKE51bWJlcih0b2tlbj8udXNkX2Ftb3VudCktYy51c2RBbW91bnQpPD1NYXRoLm1heCgxZS05LE1hdGguYWJzKGMudXNkQW1vdW50KSoxZS05KTtcbmNvbnN0IGNvbnRyb2xzT0s9c3QubWFzdGVyPT09dHJ1ZSYmIXN0LnNhZmV0eUxvY2smJigoYy5kaXJlY3Rpb249PT0nQlVZJyYmdGMuYXV0b0J1eT09PXRydWUpfHwoYy5kaXJlY3Rpb249PT0nU0VMTCcmJnRjLmF1dG9TZWxsPT09dHJ1ZSkpO1xuY29uc3QgY3VycmVudFRvcGljPVN0cmluZyhzdW1tYXJ5Lm50ZnlfZWZmZWN0aXZlX3RvcGljfHx0b2tlbj8ubnRmeV90b3BpY3x8JycpO1xuY29uc3QgdG9waWNTdGFibGU9Y3VycmVudFRvcGljPT09Yy50b3BpYztcbmNvbnN0IGFpPU51bWJlcihxLmFtb3VudEluKSxhbz1OdW1iZXIocS5hbW91bnRPdXQpO1xuY29uc3QgcHJpY2U9Yy5kaXJlY3Rpb249PT0nQlVZJz8oYWk+MCYmYW8+MD9haS9hbzpudWxsKTooYWk+MCYmYW8+MD9hby9haTpudWxsKTtcbmNvbnN0IHByaWNlT0s9TnVtYmVyLmlzRmluaXRlKHByaWNlKSYmKGMuZGlyZWN0aW9uPT09J0JVWSc/cHJpY2U8PWMudGFyZ2V0OnByaWNlPj1jLnRhcmdldCk7XG5jb25zdCByYXdJbXBhY3Q9TnVtYmVyKHEucHJpY2VJbXBhY3RQY3QpLGltcGFjdFBjdD1OdW1iZXIuaXNGaW5pdGUocmF3SW1wYWN0KT9NYXRoLmFicyhyYXdJbXBhY3QpKjEwMDpudWxsO1xuY29uc3QgbWF4SW1wYWN0PU51bWJlcihzdC5tYXhQcmljZUltcGFjdFBjdHx8Yy5tYXhQcmljZUltcGFjdFBjdHx8Mik7XG5jb25zdCBpbXBhY3RPSz1pbXBhY3RQY3QhPT1udWxsJiZpbXBhY3RQY3Q8PW1heEltcGFjdDtcbmNvbnN0IHRyYWRlQ2FwPU51bWJlcihzdC5tYXhUcmFkZVVTREN8fGMubWF4VHJhZGVVU0RDfHw1MDApO1xuY29uc3QgdHJhZGVDYXBPSz1OdW1iZXIoYy51c2RBbW91bnQpPjAmJk51bWJlcihjLnVzZEFtb3VudCk8PXRyYWRlQ2FwO1xuY29uc3Qgd2FsbGV0QXNzaWduZWQ9YmFsLmFzc2lnbmVkPT09dHJ1ZTtcbmNvbnN0IHdhbGxldENvbmZpZ3VyZWQ9YmFsLmNvbmZpZ3VyZWQ9PT10cnVlO1xuY29uc3Qgd2FsbGV0TWF0Y2hlcz0hd2FsbGV0QXNzaWduZWR8fChiYWwud2FsbGV0PT09YXNzaWduZWROb3cmJmFzc2lnbm1lbnRTdGFibGUpO1xuY29uc3QgYmFja3VwT0s9c3QubW9kZT09PSd0ZXN0aW5nJ3x8KHdhbGxldENvbmZpZ3VyZWQmJmJhbC5iYWNrdXBDb25maXJtZWQ9PT10cnVlKTtcbmNvbnN0IGJhbGFuY2VPSz0hd2FsbGV0QXNzaWduZWRcbiAgPyBzdC5tb2RlPT09J3Rlc3RpbmcnXG4gIDogd2FsbGV0Q29uZmlndXJlZCYmTnVtYmVyKGJhbC5zb2wpPj1OdW1iZXIoc3QubWluU29sUmVzZXJ2ZSkmJlxuICAgIChjLmRpcmVjdGlvbj09PSdCVVknP051bWJlcihiYWwudXNkYykrMWUtOT49YWk6TnVtYmVyKGJhbC50b2tlbikrMWUtOT49YWkpO1xubGV0IHJlYXNvbj1udWxsO1xuaWYoIWNvbmZpZ09LKXJlYXNvbj0nYXBwIHRva2VuL3RhcmdldC9VU0RDIHNjZW5hcmlvIGNoYW5nZWQgZHVyaW5nIHZhbGlkYXRpb24nO1xuZWxzZSBpZighY29udHJvbHNPSylyZWFzb249J01BU1RFUi9jb2luIGNvbnRyb2wvc2FmZXR5IGxvY2sgY2hhbmdlZCBkdXJpbmcgdmFsaWRhdGlvbic7XG5lbHNlIGlmKCF0b3BpY1N0YWJsZSlyZWFzb249J2VmZmVjdGl2ZSBudGZ5IHRvcGljIGNoYW5nZWQgZHVyaW5nIHZhbGlkYXRpb24nO1xuZWxzZSBpZighdHJhZGVDYXBPSylyZWFzb249YFVTREMgc2NlbmFyaW8gJHtjLnVzZEFtb3VudH0gZXhjZWVkcyBtYXggdHJhZGUgY2FwICR7dHJhZGVDYXB9YDtcbmVsc2UgaWYoIWFzc2lnbm1lbnRTdGFibGUpcmVhc29uPSdjb2luIHRyYWRpbmctd2FsbGV0IGFzc2lnbm1lbnQgY2hhbmdlZCBkdXJpbmcgdmFsaWRhdGlvbic7XG5lbHNlIGlmKCF3YWxsZXRNYXRjaGVzKXJlYXNvbj0nYmFsYW5jZSByZXNwb25zZSBkb2VzIG5vdCBtYXRjaCB0aGUgY29pbiBhc3NpZ25lZCB3YWxsZXQnO1xuZWxzZSBpZihzdC5tb2RlPT09J3RyYWRpbmcnJiYhd2FsbGV0QXNzaWduZWQpcmVhc29uPSdubyB0cmFkaW5nIHdhbGxldCBpcyBhc3NpZ25lZCB0byB0aGlzIGNvaW4nO1xuZWxzZSBpZih3YWxsZXRBc3NpZ25lZCYmIXdhbGxldENvbmZpZ3VyZWQpcmVhc29uPSdhc3NpZ25lZCB0cmFkaW5nIHdhbGxldCBpcyB1bmF2YWlsYWJsZSBpbiBHYXRld2F5JztcbmVsc2UgaWYoIWJhY2t1cE9LKXJlYXNvbj0nYXNzaWduZWQgdHJhZGluZyB3YWxsZXQgcmVjb3ZlcnkgYmFja3VwIGlzIG5vdCBjb25maXJtZWQnO1xuZWxzZSBpZighcHJpY2VPSylyZWFzb249J2ZpbmFsIGV4ZWN1dGFibGUgcXVvdGUgbm8gbG9uZ2VyIG1lZXRzIGZpcmVkIHRhcmdldCc7XG5lbHNlIGlmKCFpbXBhY3RPSylyZWFzb249YGZpbmFsIGV4ZWN1dGFibGUgcXVvdGUgaW1wYWN0ICR7aW1wYWN0UGN0PT09bnVsbD8naW52YWxpZCc6aW1wYWN0UGN0LnRvRml4ZWQoMikrJyUnfSBleGNlZWRzIGNhcCAke21heEltcGFjdH0lYDtcbmVsc2UgaWYoIWJhbGFuY2VPSylyZWFzb249J2Fzc2lnbmVkIHdhbGxldCBiYWxhbmNlIG9yIFNPTCByZXNlcnZlIGlzIGluc3VmZmljaWVudCc7XG5jb25zdCBwYXNzPSFyZWFzb247XG5yZXR1cm4gW3tqc29uOnsuLi5jLG1vZGU6c3QubW9kZXx8J3Rlc3RpbmcnLHBhc3MscmVhc29uLFxuIGZpbmFsUHJpY2U6cHJpY2UscXVvdGVJZDpxLnF1b3RlSWQsdG9rZW5JbjpxLnRva2VuSW4sdG9rZW5PdXQ6cS50b2tlbk91dCxcbiBhbW91bnRJbjphaSxhbW91bnRPdXQ6YW8scHJpY2VJbXBhY3RQY3Q6cmF3SW1wYWN0LHByaWNlSW1wYWN0UGVyY2VudDppbXBhY3RQY3QsbWF4UHJpY2VJbXBhY3RQY3Q6bWF4SW1wYWN0LG1heFRyYWRlVVNEQzp0cmFkZUNhcCxcbiBhc3NpZ25lZFdhbGxldDphc3NpZ25lZE5vdyx3YWxsZXRBc3NpZ25lZCx3YWxsZXRDb25maWd1cmVkLHdhbGxldE5pY2tuYW1lOmJhbC53YWxsZXROaWNrbmFtZXx8bnVsbCxiYWxhbmNlczpiYWwsXG4gdG9rZW5BbW91bnQ6Yy5kaXJlY3Rpb249PT0nU0VMTCc/YWk6bnVsbCxcbiBleGVjdXRpb25fY2FwYWJsZTpzdC5tb2RlPT09J3RyYWRpbmcnXG59fV07In0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5jb2RlIiwidHlwZVZlcnNpb24iOjIsInBvc2l0aW9uIjpbNDIzMCwtMzYwXSwiaWQiOiI0NjYyMGIxYy0xYTM1LTRmZDctOWExYi1kMDE1MDI5ODE0MDciLCJuYW1lIjoiU0VMTCBGaW5hbCBTYWZldHkgRXZhbHVhdGlvbiJ9LHsicGFyYW1ldGVycyI6eyJjb25kaXRpb25zIjp7Im9wdGlvbnMiOnsiY2FzZVNlbnNpdGl2ZSI6dHJ1ZSwibGVmdFZhbHVlIjoiIiwidHlwZVZhbGlkYXRpb24iOiJzdHJpY3QiLCJ2ZXJzaW9uIjoyfSwiY29uZGl0aW9ucyI6W3siaWQiOiI0YWJjYzk2MC04MTExLTQ4ZWQtYWIzOS1jMTg0NGE4MzlkNTUiLCJsZWZ0VmFsdWUiOiI9e3sgJGpzb24ucGFzcyB9fSIsInJpZ2h0VmFsdWUiOnRydWUsIm9wZXJhdG9yIjp7InR5cGUiOiJib29sZWFuIiwib3BlcmF0aW9uIjoidHJ1ZSIsInNpbmdsZVZhbHVlIjp0cnVlfX1dLCJjb21iaW5hdG9yIjoiYW5kIn0sIm9wdGlvbnMiOnt9fSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmlmIiwidHlwZVZlcnNpb24iOjIuMiwicG9zaXRpb24iOls0NDYwLC0zNjBdLCJpZCI6IjhmZjMzMjM0LTM3ZDYtNDI4ZC04NzU5LWM3ZjliZTAzYjVmZCIsIm5hbWUiOiJTRUxMIEZpbmFsIFBhc3M/In0seyJwYXJhbWV0ZXJzIjp7ImNvbmRpdGlvbnMiOnsib3B0aW9ucyI6eyJjYXNlU2Vuc2l0aXZlIjp0cnVlLCJsZWZ0VmFsdWUiOiIiLCJ0eXBlVmFsaWRhdGlvbiI6InN0cmljdCIsInZlcnNpb24iOjJ9LCJjb25kaXRpb25zIjpbeyJpZCI6IjQwMjVkYmViLWViNGEtNGYxZS05YTY1LTVjODU4MzBkMWRjZiIsImxlZnRWYWx1ZSI6Ij17eyAkanNvbi5tb2RlIH19IiwicmlnaHRWYWx1ZSI6InRyYWRpbmciLCJvcGVyYXRvciI6eyJ0eXBlIjoic3RyaW5nIiwib3BlcmF0aW9uIjoiZXF1YWxzIn19XSwiY29tYmluYXRvciI6ImFuZCJ9LCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5pZiIsInR5cGVWZXJzaW9uIjoyLjIsInBvc2l0aW9uIjpbNDY5MCwtNDEwXSwiaWQiOiI4Mjk2ZmNmNS03NTlmLTQyOWMtODk3NS0xZTFiOTY5Mjk1ZjQiLCJuYW1lIjoiU0VMTCBUcmFkaW5nIE1vZGU/In0seyJwYXJhbWV0ZXJzIjp7ImpzQ29kZSI6InJldHVybiBbe2pzb246e2RlY2lzaW9uOidXT1VMRF9UUkFERScsbW9kZTonVEVTVElORycsdG9rZW46JGpzb24ubmFtZSxtaW50OiRqc29uLm1pbnQsZGlyZWN0aW9uOiRqc29uLmRpcmVjdGlvbix0YXJnZXQ6JGpzb24udGFyZ2V0LGZpbmFsUHJpY2U6JGpzb24uZmluYWxQcmljZSxhbW91bnRJbjokanNvbi5hbW91bnRJbixhbW91bnRPdXQ6JGpzb24uYW1vdW50T3V0LHByaWNlSW1wYWN0UGVyY2VudDokanNvbi5wcmljZUltcGFjdFBlcmNlbnQsbWF4UHJpY2VJbXBhY3RQY3Q6JGpzb24ubWF4UHJpY2VJbXBhY3RQY3QsbWF4VHJhZGVVU0RDOiRqc29uLm1heFRyYWRlVVNEQyxhc3NpZ25lZFdhbGxldDokanNvbi5hc3NpZ25lZFdhbGxldCx3YWxsZXROaWNrbmFtZTokanNvbi53YWxsZXROaWNrbmFtZSxiYWxhbmNlczokanNvbi5iYWxhbmNlcyxleGVjdXRpb246J0JMT0NLRUQgQlkgVEVTVElORyBNT0RFJ319XTsifSwidHlwZSI6Im44bi1ub2Rlcy1iYXNlLmNvZGUiLCJ0eXBlVmVyc2lvbiI6MiwicG9zaXRpb24iOls0OTIwLC0yOTBdLCJpZCI6IjcxODlmNzA0LWFlNTEtNDBjNy1iNDdlLTdhYWVhMmFhZDU2YiIsIm5hbWUiOiJTRUxMIFdPVUxEIFRSQURFIChUZXN0aW5nKSJ9LHsicGFyYW1ldGVycyI6eyJtZXRob2QiOiJQT1NUIiwidXJsIjoiaHR0cDovL3RyYWRpbmctY29udHJvbGxlcjo4MDgwL2ludGVybmFsL3RyYWRlL2V4ZWN1dGUiLCJzZW5kSGVhZGVycyI6dHJ1ZSwiaGVhZGVyUGFyYW1ldGVycyI6eyJwYXJhbWV0ZXJzIjpbeyJuYW1lIjoiQ29udGVudC1UeXBlIiwidmFsdWUiOiJhcHBsaWNhdGlvbi9qc29uIn1dfSwic2VuZEJvZHkiOnRydWUsImNvbnRlbnRUeXBlIjoicmF3IiwicmF3Q29udGVudFR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIiwiYm9keSI6Ij17eyBKU09OLnN0cmluZ2lmeSh7YWxlcnRJZDokanNvbi5hbGVydElkLG5hbWU6JGpzb24ubmFtZSxtaW50OiRqc29uLm1pbnQsZGlyZWN0aW9uOiRqc29uLmRpcmVjdGlvbix0YXJnZXQ6JGpzb24udGFyZ2V0LHVzZEFtb3VudDokanNvbi51c2RBbW91bnQsdG9rZW5BbW91bnQ6JGpzb24udG9rZW5BbW91bnQsYXNzaWduZWRXYWxsZXQ6JGpzb24uYXNzaWduZWRXYWxsZXQsdG9waWM6JGpzb24udG9waWMscXVvdGU6e3F1b3RlSWQ6JGpzb24ucXVvdGVJZCx0b2tlbkluOiRqc29uLnRva2VuSW4sdG9rZW5PdXQ6JGpzb24udG9rZW5PdXQsYW1vdW50SW46JGpzb24uYW1vdW50SW4sYW1vdW50T3V0OiRqc29uLmFtb3VudE91dCxwcmljZUltcGFjdFBjdDokanNvbi5wcmljZUltcGFjdFBjdH0gfSkgfX0iLCJvcHRpb25zIjp7fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5odHRwUmVxdWVzdCIsInR5cGVWZXJzaW9uIjo0LjIsInBvc2l0aW9uIjpbNDkyMCwtNDYwXSwiaWQiOiIxMjVkNDMwZC1hYTZhLTRlMDctOGM3Yy0xMGFjYWVhY2NhYWQiLCJuYW1lIjoiU0VMTCBFeGVjdXRlIHZpYSBDb250cm9sbGVyIn0seyJwYXJhbWV0ZXJzIjp7ImpzQ29kZSI6IlxuY29uc3QgdD0kanNvbi50cmFkZXx8e307XG5sZXQgZGVjaXNpb249J1RSQURFX1JFU1VMVCc7XG5pZih0LnN0YXR1cz09PSdDT05GSVJNRUQnKWRlY2lzaW9uPSdUUkFERV9DT05GSVJNRUQnO1xuZWxzZSBpZih0LnN0YXR1cz09PSdGQUlMRUQnKWRlY2lzaW9uPSdUUkFERV9GQUlMRUQnO1xuZWxzZSBpZih0LnN0YXR1cz09PSdVTkNFUlRBSU4nfHx0LnN0YXR1cz09PSdQRU5ESU5HJylkZWNpc2lvbj0nVFJBREVfVU5DRVJUQUlOJztcbmVsc2UgaWYodC5zdGF0dXM9PT0nQlVSU1RfU1VQUFJFU1NFRCcpZGVjaXNpb249J0JVUlNUX1NVUFBSRVNTRUQnO1xuZWxzZSBpZih0LnN0YXR1cz09PSdUUklHR0VSX0dVQVJEX1NVUFBSRVNTRUQnKWRlY2lzaW9uPSdUUklHR0VSX0dVQVJEX1NVUFBSRVNTRUQnO1xucmV0dXJuIFt7anNvbjp7ZGVjaXNpb24sbW9kZTonVFJBRElORycsdHJhZGU6dH19XTtcbiJ9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuY29kZSIsInR5cGVWZXJzaW9uIjoyLCJwb3NpdGlvbiI6WzUxNTAsLTQ2MF0sImlkIjoiYTYyNTViMDYtZGZiNC00MGYxLTllNzUtMmM4N2FlZjk2NGEyIiwibmFtZSI6IlNFTEwgRm9ybWF0IFRyYWRlIFJlc3VsdCJ9LHsicGFyYW1ldGVycyI6eyJqc0NvZGUiOiJyZXR1cm4gW3tqc29uOntkZWNpc2lvbjonQUJPUlRFRCcscmVhc29uOiRqc29uLnJlYXNvbix0b2tlbjokanNvbi5uYW1lLG1pbnQ6JGpzb24ubWludCxkaXJlY3Rpb246JGpzb24uZGlyZWN0aW9uLHRhcmdldDokanNvbi50YXJnZXQsbW9kZTokanNvbi5tb2RlLGV4ZWN1dGlvbjonTk9ORSd9fV07In0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5jb2RlIiwidHlwZVZlcnNpb24iOjIsInBvc2l0aW9uIjpbNDY5MCwtMjEwXSwiaWQiOiIyMWZiMGNlMi1jOTFhLTQ0MjItOWE3Yi00ZWU0MDUzMzJhNTEiLCJuYW1lIjoiU0VMTCBBYm9ydCBGaW5hbCJ9LHsicGFyYW1ldGVycyI6eyJqc0NvZGUiOiJyZXR1cm4gW3tqc29uOntkZWNpc2lvbjonQUJPUlRFRCcscmVhc29uOiRqc29uLnJlYXNvbnx8J0ZyZXNoIEdhdGV3YXkgdmFsaWRhdGlvbiBmYWlsZWQnLHRva2VuOiRqc29uLm5hbWUsbWludDokanNvbi5taW50LGRpcmVjdGlvbjokanNvbi5kaXJlY3Rpb24sdGFyZ2V0OiRqc29uLnRhcmdldCxleGVjdXRpb246J05PTkUnfX1dOyJ9LCJ0eXBlIjoibjhuLW5vZGVzLWJhc2UuY29kZSIsInR5cGVWZXJzaW9uIjoyLCJwb3NpdGlvbiI6WzIxNjAsMTkwXSwiaWQiOiJkMGE3NjE5NS1jNTA4LTRhNDQtYmVkYi02NmViNDgxOTcxMWIiLCJuYW1lIjoiQWJvcnQgRWFybHkgVmFsaWRhdGlvbiJ9LHsicGFyYW1ldGVycyI6eyJyZXNwb25kV2l0aCI6Impzb24iLCJyZXNwb25zZUJvZHkiOiI9e3sgJGpzb24gfX0iLCJvcHRpb25zIjp7InJlc3BvbnNlSGVhZGVycyI6eyJlbnRyaWVzIjpbeyJuYW1lIjoiQ2FjaGUtQ29udHJvbCIsInZhbHVlIjoibm8tc3RvcmUifV19fX0sInR5cGUiOiJuOG4tbm9kZXMtYmFzZS5yZXNwb25kVG9XZWJob29rIiwidHlwZVZlcnNpb24iOjEuNCwicG9zaXRpb24iOls1NDAwLDBdLCJpZCI6ImVjN2JmZDY1LTBhMjYtNDcxYi04YTI4LTRhYjM1OTFmOTk2NCIsIm5hbWUiOiJSZXNwb25kIn1dLCJjb25uZWN0aW9ucyI6eyJOVEZZIEFsZXJ0Ijp7Im1haW4iOltbeyJub2RlIjoiQ2xhaW0gQ29udHJvbGxlciBIYW5kb2ZmIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIkNsYWltIENvbnRyb2xsZXIgSGFuZG9mZiI6eyJtYWluIjpbW3sibm9kZSI6IlZhbGlkIEhhbmRvZmY/IiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIlZhbGlkIEhhbmRvZmY/Ijp7Im1haW4iOltbeyJub2RlIjoiR2V0IEp1cGl0ZXIgQXBwIFN0YXRlIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dLFt7Im5vZGUiOiJSZWplY3QgRm9yZ2VkL0V4cGlyZWQiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiUmVqZWN0IEZvcmdlZC9FeHBpcmVkIjp7Im1haW4iOltbeyJub2RlIjoiUmVzcG9uZCIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJHZXQgSnVwaXRlciBBcHAgU3RhdGUiOnsibWFpbiI6W1t7Im5vZGUiOiJHZXQgVHJhZGluZyBDb250cm9sbGVyIFN0YXRlIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIkdldCBUcmFkaW5nIENvbnRyb2xsZXIgU3RhdGUiOnsibWFpbiI6W1t7Im5vZGUiOiJQYXJzZSArIEF1dGhvcml6ZSIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJQYXJzZSArIEF1dGhvcml6ZSI6eyJtYWluIjpbW3sibm9kZSI6IkF1dGhvcml6ZWQ/IiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIkF1dGhvcml6ZWQ/Ijp7Im1haW4iOltbeyJub2RlIjoiU2NlbmFyaW8gUXVvdGUgIzEiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV0sW3sibm9kZSI6Iklnbm9yZWQiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiSWdub3JlZCI6eyJtYWluIjpbW3sibm9kZSI6IlJlc3BvbmQiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiU2NlbmFyaW8gUXVvdGUgIzEiOnsibWFpbiI6W1t7Im5vZGUiOiJTRUxMIEFsZXJ0PyIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJTRUxMIEFsZXJ0PyI6eyJtYWluIjpbW3sibm9kZSI6IldhaXQgMnMgU0VMTCBzaXppbmciLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV0sW3sibm9kZSI6IkV2YWx1YXRlIEJVWSAjMSIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJFdmFsdWF0ZSBCVVkgIzEiOnsibWFpbiI6W1t7Im5vZGUiOiJCVVkgIzEgUGFzcz8iLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiQlVZICMxIFBhc3M/Ijp7Im1haW4iOltbeyJub2RlIjoiV2FpdCAycyBCVVkiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV0sW3sibm9kZSI6IkFib3J0IEVhcmx5IFZhbGlkYXRpb24iLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiV2FpdCAycyBCVVkiOnsibWFpbiI6W1t7Im5vZGUiOiJCVVkgUXVvdGUgIzIiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiQlVZIFF1b3RlICMyIjp7Im1haW4iOltbeyJub2RlIjoiRXZhbHVhdGUgQlVZICMyIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIkV2YWx1YXRlIEJVWSAjMiI6eyJtYWluIjpbW3sibm9kZSI6IkJVWSAjMiBQYXNzPyIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJCVVkgIzIgUGFzcz8iOnsibWFpbiI6W1t7Im5vZGUiOiJCVVkgRmluYWwgQXBwIFN0YXRlIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dLFt7Im5vZGUiOiJBYm9ydCBFYXJseSBWYWxpZGF0aW9uIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIldhaXQgMnMgU0VMTCBzaXppbmciOnsibWFpbiI6W1t7Im5vZGUiOiJTRUxMIFF1b3RlICMxIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIlNFTEwgUXVvdGUgIzEiOnsibWFpbiI6W1t7Im5vZGUiOiJFdmFsdWF0ZSBTRUxMICMxIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIkV2YWx1YXRlIFNFTEwgIzEiOnsibWFpbiI6W1t7Im5vZGUiOiJTRUxMICMxIFBhc3M/IiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIlNFTEwgIzEgUGFzcz8iOnsibWFpbiI6W1t7Im5vZGUiOiJXYWl0IDJzIFNFTEwiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV0sW3sibm9kZSI6IkFib3J0IEVhcmx5IFZhbGlkYXRpb24iLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiV2FpdCAycyBTRUxMIjp7Im1haW4iOltbeyJub2RlIjoiU0VMTCBRdW90ZSAjMiIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJTRUxMIFF1b3RlICMyIjp7Im1haW4iOltbeyJub2RlIjoiRXZhbHVhdGUgU0VMTCAjMiIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJFdmFsdWF0ZSBTRUxMICMyIjp7Im1haW4iOltbeyJub2RlIjoiU0VMTCAjMiBQYXNzPyIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJTRUxMICMyIFBhc3M/Ijp7Im1haW4iOltbeyJub2RlIjoiU0VMTCBGaW5hbCBBcHAgU3RhdGUiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV0sW3sibm9kZSI6IkFib3J0IEVhcmx5IFZhbGlkYXRpb24iLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiQWJvcnQgRWFybHkgVmFsaWRhdGlvbiI6eyJtYWluIjpbW3sibm9kZSI6IlJlc3BvbmQiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiQlVZIEZpbmFsIEFwcCBTdGF0ZSI6eyJtYWluIjpbW3sibm9kZSI6IkJVWSBGaW5hbCBDb250cm9sbGVyIFN0YXRlIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIkJVWSBGaW5hbCBDb250cm9sbGVyIFN0YXRlIjp7Im1haW4iOltbeyJub2RlIjoiQlVZIFdhbGxldCBCYWxhbmNlcyIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJCVVkgV2FsbGV0IEJhbGFuY2VzIjp7Im1haW4iOltbeyJub2RlIjoiQlVZIFdhaXQgMnMgRmluYWwiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiQlVZIFdhaXQgMnMgRmluYWwiOnsibWFpbiI6W1t7Im5vZGUiOiJCVVkgRklOQUwgRXhlY3V0YWJsZSBRdW90ZSIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJCVVkgRklOQUwgRXhlY3V0YWJsZSBRdW90ZSI6eyJtYWluIjpbW3sibm9kZSI6IkJVWSBGaW5hbCBTYWZldHkgRXZhbHVhdGlvbiIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJCVVkgRmluYWwgU2FmZXR5IEV2YWx1YXRpb24iOnsibWFpbiI6W1t7Im5vZGUiOiJCVVkgRmluYWwgUGFzcz8iLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiQlVZIEZpbmFsIFBhc3M/Ijp7Im1haW4iOltbeyJub2RlIjoiQlVZIFRyYWRpbmcgTW9kZT8iLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV0sW3sibm9kZSI6IkJVWSBBYm9ydCBGaW5hbCIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJCVVkgQWJvcnQgRmluYWwiOnsibWFpbiI6W1t7Im5vZGUiOiJSZXNwb25kIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIkJVWSBUcmFkaW5nIE1vZGU/Ijp7Im1haW4iOltbeyJub2RlIjoiQlVZIEV4ZWN1dGUgdmlhIENvbnRyb2xsZXIiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV0sW3sibm9kZSI6IkJVWSBXT1VMRCBUUkFERSAoVGVzdGluZykiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiQlVZIFdPVUxEIFRSQURFIChUZXN0aW5nKSI6eyJtYWluIjpbW3sibm9kZSI6IlJlc3BvbmQiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiQlVZIEV4ZWN1dGUgdmlhIENvbnRyb2xsZXIiOnsibWFpbiI6W1t7Im5vZGUiOiJCVVkgRm9ybWF0IFRyYWRlIFJlc3VsdCIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJCVVkgRm9ybWF0IFRyYWRlIFJlc3VsdCI6eyJtYWluIjpbW3sibm9kZSI6IlJlc3BvbmQiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiU0VMTCBGaW5hbCBBcHAgU3RhdGUiOnsibWFpbiI6W1t7Im5vZGUiOiJTRUxMIEZpbmFsIENvbnRyb2xsZXIgU3RhdGUiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiU0VMTCBGaW5hbCBDb250cm9sbGVyIFN0YXRlIjp7Im1haW4iOltbeyJub2RlIjoiU0VMTCBXYWxsZXQgQmFsYW5jZXMiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiU0VMTCBXYWxsZXQgQmFsYW5jZXMiOnsibWFpbiI6W1t7Im5vZGUiOiJTRUxMIFdhaXQgMnMgRmluYWwiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiU0VMTCBXYWl0IDJzIEZpbmFsIjp7Im1haW4iOltbeyJub2RlIjoiU0VMTCBGSU5BTCBFeGVjdXRhYmxlIFF1b3RlIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIlNFTEwgRklOQUwgRXhlY3V0YWJsZSBRdW90ZSI6eyJtYWluIjpbW3sibm9kZSI6IlNFTEwgRmluYWwgU2FmZXR5IEV2YWx1YXRpb24iLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiU0VMTCBGaW5hbCBTYWZldHkgRXZhbHVhdGlvbiI6eyJtYWluIjpbW3sibm9kZSI6IlNFTEwgRmluYWwgUGFzcz8iLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiU0VMTCBGaW5hbCBQYXNzPyI6eyJtYWluIjpbW3sibm9kZSI6IlNFTEwgVHJhZGluZyBNb2RlPyIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XSxbeyJub2RlIjoiU0VMTCBBYm9ydCBGaW5hbCIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJTRUxMIEFib3J0IEZpbmFsIjp7Im1haW4iOltbeyJub2RlIjoiUmVzcG9uZCIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJTRUxMIFRyYWRpbmcgTW9kZT8iOnsibWFpbiI6W1t7Im5vZGUiOiJTRUxMIEV4ZWN1dGUgdmlhIENvbnRyb2xsZXIiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV0sW3sibm9kZSI6IlNFTEwgV09VTEQgVFJBREUgKFRlc3RpbmcpIiwidHlwZSI6Im1haW4iLCJpbmRleCI6MH1dXX0sIlNFTEwgV09VTEQgVFJBREUgKFRlc3RpbmcpIjp7Im1haW4iOltbeyJub2RlIjoiUmVzcG9uZCIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19LCJTRUxMIEV4ZWN1dGUgdmlhIENvbnRyb2xsZXIiOnsibWFpbiI6W1t7Im5vZGUiOiJTRUxMIEZvcm1hdCBUcmFkZSBSZXN1bHQiLCJ0eXBlIjoibWFpbiIsImluZGV4IjowfV1dfSwiU0VMTCBGb3JtYXQgVHJhZGUgUmVzdWx0Ijp7Im1haW4iOltbeyJub2RlIjoiUmVzcG9uZCIsInR5cGUiOiJtYWluIiwiaW5kZXgiOjB9XV19fSwicGluRGF0YSI6e30sInNldHRpbmdzIjp7ImV4ZWN1dGlvbk9yZGVyIjoidjEiLCJ0aW1lem9uZSI6IkV1cm9wZS9Mb25kb24ifSwiYWN0aXZlIjpmYWxzZSwidGFncyI6W10sIm1ldGEiOnsidGVtcGxhdGVDcmVkc1NldHVwQ29tcGxldGVkIjp0cnVlfSwiaWQiOiJKQVRDb21tdW5pdHkxMDExIn0=
+    volumes:
+    - type: volume
+      source: n8n_data
+      target: /home/node/.n8n
+      volume:
+        nocopy: true
+    - type: volume
+      source: bootstrap_data
+      target: /bootstrap
+      volume:
+        nocopy: true
+    depends_on:
+      n8n:
+        condition: service_healthy
+    networks:
+    - n8n_db
+    - trading_control
+networks:
+  n8n_db:
+    driver: bridge
+  n8n_runners:
+    driver: bridge
+  trading_control:
+    driver: bridge
+volumes:
+  postgres_data:
+  n8n_data:
+  bootstrap_data:
+  controller_data:
+  gateway_control:
+  gateway_conf:
+  gateway_logs:
