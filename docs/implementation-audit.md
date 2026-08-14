@@ -10,12 +10,12 @@ This audit covers the first public release. It verifies the execution controls, 
 
 - Only host port 5680 is published. n8n 5678, Gateway 15888, and configurator 8081 remain private.
 - PostgreSQL 16, n8n/runner 2.31.6, Node 22 Alpine, Gateway 2.15.1, and Alpine 3.22 are pinned by readable tag and immutable multi-architecture digest.
-- Seven project-scoped Docker named volumes replace host-specific binds; all 15 persistent mounts use `volume.nocopy: true`, and no fixed host-global container names remain.
+- Seven project-scoped Docker named volumes provide persistent storage; all 15 persistent mounts use `volume.nocopy: true`, and no fixed host-global container names are used.
 - Gateway initialization accepts a genuinely empty volume or a complete existing configuration, but fails closed on partial/non-empty state instead of running defaults over potentially restored wallet/RPC data.
-- The n8n permissions initializer retains the UID 1000 ownership/write fix.
+- The n8n permissions initializer applies the UID 1000 ownership/write fix.
 - Bootstrap generates workflow ID `JATCommunity1022`, verifies SHA-256 `d9cdd129533546d7c0ab4178eb9cb8a4dd517f55da5be43be930b43c5a677848`, verifies publication, performs the restart request/acknowledgement, and verifies health. Its success marker is written only after that sequence completes, so a late failure remains retryable.
-- The production webhook remains `jupiter-ntfy-event`, and readiness probes that webhook rather than relying only on `/healthz`.
-- Both BUY and SELL execution bodies retain whitespace between the nested quote close and outer object close, preserving the n8n expression-parser fix.
+- The production webhook is `jupiter-ntfy-event`, and readiness probes that webhook rather than relying only on `/healthz`.
+- Both BUY and SELL execution bodies include whitespace between the nested quote close and outer object close, satisfying the n8n expression parser.
 - Controller startup forces `TESTING` and `MASTER OFF`; unresolved persisted submissions become `UNCERTAIN` and engage the safety lock.
 - Exact mint, effective topic, fired target, token enabled state, source USDC scenario, AUTO direction, current mode/MASTER, risk caps, current wallet assignment, backup confirmation, balances, SOL reserve, and final quote are rechecked.
 - BUY and SELL price calculations match the documented semantics. SELL reuses the validated scenario token amount.
@@ -30,12 +30,12 @@ This audit covers the first public release. It verifies the execution controls, 
 
 ## Deployment and persistence
 
-- Standardized persistent storage on seven automatically created, project-scoped named volumes.
-- Added a stable default Compose project name while preserving Portainer/CLI override precedence.
-- Removed fixed host-global container names.
-- Added stopped-stack backup, checksum verification, and clean-host restore guidance.
-- Added fail-closed detection for partial Gateway configuration volumes.
-- Expanded the Compose matrix to enforce storage, network, dependency, restart, secret, and published-port invariants.
+- Persistent storage uses seven automatically created, project-scoped named volumes.
+- The Compose file defines a stable default project name while preserving Portainer/CLI override precedence.
+- Services have no fixed host-global container names.
+- Documentation includes stopped-stack backup, checksum verification, and clean-host restore guidance.
+- Gateway initialization fails closed when a configuration volume is non-empty but incomplete.
+- The Compose matrix enforces storage, network, dependency, restart, secret, and published-port invariants.
 
 ## Endpoint, topic, and deployment hardening
 
@@ -85,4 +85,4 @@ Storage uses project-scoped named volumes, so fresh installations require no hos
 
 ## Commissioning claim
 
-Nothing in the repository contents proves that a real transaction has completed on the reference deployment. Documentation continues to require a deliberately tiny verified live transaction before that claim changes.
+Repository verification confirms the transaction-path safeguards but does not prove that an on-chain transaction has completed. First-release documentation therefore requires a deliberately tiny verified live trade before an installation is treated as commissioned.

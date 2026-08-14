@@ -39,7 +39,7 @@ Docker documents named volumes as its preferred persistence mechanism for contai
 - Persistent storage is not a backup. A host/disk failure can remove containers and volumes together.
 - Named volumes are not automatically encrypted. Use appropriate host/disk encryption, access control, monitoring, and free-space alerts for the Docker data store.
 
-Docker's [`compose down`](https://docs.docker.com/reference/cli/docker/compose/down/) reference confirms that named volumes are removed only when the volume option is requested. Portainer also warns that [removing a volume](https://docs.portainer.io/2.33-lts/user/docker/volumes/remove) permanently erases its contents.
+Docker's [`compose down`](https://docs.docker.com/reference/cli/docker/compose/down/) reference confirms that named volumes are removed only when the volume option is requested. Portainer also warns that [removing a volume](https://docs.portainer.io/user/docker/volumes/remove) permanently erases its contents.
 
 Portainer's rename/migration feature [does not relocate persistent-volume contents](https://docs.portainer.io/user/docker/stacks/migrate). Back up and restore the volumes explicitly when moving to another Docker environment; changing only the stack definition is not a data migration.
 

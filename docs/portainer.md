@@ -8,9 +8,9 @@ Use a **Docker Standalone** Portainer environment. Do not deploy this Compose wi
 
 The trader's Linux host needs an available TCP port 5680, enough Docker storage, and outbound DNS/HTTPS access. All pinned images provide Linux AMD64 and ARM64 variants.
 
-The Compose uses project-scoped service names, networks, and named volumes. Its default dashboard still publishes host port 5680, so the copy/paste configuration supports one stack per host unless an advanced operator deliberately changes the published port. Different stack names have isolated volume namespaces.
+The Compose uses project-scoped service names, networks, and named volumes. The dashboard publishes host port 5680, so the copy/paste configuration supports one stack per host unless an advanced operator deliberately changes the published port. Different stack names have isolated volume namespaces.
 
-Portainer supports pasting a Compose file into its Web editor and defining environment variables separately, so updating a value does not require editing the Compose. See Portainer's official [Add a new stack](https://docs.portainer.io/sts/user/docker/stacks/add) documentation.
+Portainer supports pasting a Compose file into its Web editor and defining environment variables separately, so updating a value does not require editing the Compose. See Portainer's official [Add a new stack](https://docs.portainer.io/user/docker/stacks/add) documentation.
 
 ## 1. Generate the four stable secrets
 

@@ -374,7 +374,7 @@ Every controller restart begins in **TESTING** with **MASTER OFF**.
 Enabling `TRADING` requires deliberate typed confirmation and green Trading readiness. `MASTER` must then be enabled separately.
 
 > [!CAUTION]
-> A successful real transaction has **not yet been proven end to end on the reference deployment**. Do not describe this release as live-transaction commissioned until one deliberately tiny trade has produced a verified Solana signature and the expected wallet balance changes.
+> Trading mode is designed to submit real Solana transactions, but no documented end-to-end live trade has yet been completed with this first public release. Start with `TESTING` and `MASTER OFF`. Before using meaningful funds, complete one deliberately tiny trade and verify the Solana signature, exact token mint, selected wallet, and expected balance changes.
 
 ---
 

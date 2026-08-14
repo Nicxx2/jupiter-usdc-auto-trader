@@ -1,6 +1,6 @@
 # Tiny live-trade commissioning
 
-The reference v10.2.2 deployment has not yet recorded a proven end-to-end real transaction. Use this checklist to commission deliberately and preserve evidence without exposing secrets.
+Trading mode is designed to submit real Solana transactions, but no documented end-to-end live trade has yet been completed with this first public release. Use this checklist to commission your installation deliberately and preserve evidence without exposing secrets.
 
 ## Before enabling Trading
 
@@ -43,14 +43,14 @@ The reference v10.2.2 deployment has not yet recorded a proven end-to-end real t
 For `CONFIRMED`, record and independently verify:
 
 - the Solana transaction signature;
-- signer/owner is the token's explicitly assigned wallet;
+- the signer/owner is the token's explicitly assigned wallet;
 - input and output mints are exact;
 - input amount matches the intended tiny scenario;
 - USDC/token balance changes are consistent with the direction;
 - SOL remains above the intended reserve; and
 - the same threshold is now protected by its replay guard.
 
-Only after this evidence is complete should release documentation say live execution was proven on that deployment. Increase wallet funds slowly and deliberately, not as part of the commissioning transaction.
+Only after this evidence is complete should you treat that installation as live-trade commissioned. Increase wallet funds slowly and deliberately, not as part of the commissioning transaction.
 
 ## If anything is uncertain
 
