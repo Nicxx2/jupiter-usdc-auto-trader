@@ -157,8 +157,19 @@ if (existsSync('README.md')) {
 
 if (existsSync('CHANGELOG.md')) {
   const changelog = readFileSync('CHANGELOG.md', 'utf8');
-  check(changelog.includes('## [10.2.2] - 2026-08-14'), 'CHANGELOG current release entry is missing');
-  check(changelog.includes('JATCommunity1022'), 'CHANGELOG workflow release identity is missing');
+  const currentReleaseStart = changelog.indexOf('## [10.2.2] - 2026-08-14');
+  check(currentReleaseStart >= 0, 'CHANGELOG current release entry is missing');
+  const nextReleaseStart = currentReleaseStart >= 0
+    ? changelog.indexOf('\n## [', currentReleaseStart + 1)
+    : -1;
+  const currentRelease = currentReleaseStart >= 0
+    ? changelog.slice(currentReleaseStart, nextReleaseStart >= 0 ? nextReleaseStart : undefined)
+    : '';
+  check(currentRelease.includes('JATCommunity1022'), 'CHANGELOG workflow release identity is missing');
+  check(
+    currentRelease.includes('explicitly uses HTTP on its private, unpublished Docker network'),
+    'CHANGELOG current release does not include the Gateway startup correction',
+  );
 }
 
 if (existsSync('docs/architecture.md')) {

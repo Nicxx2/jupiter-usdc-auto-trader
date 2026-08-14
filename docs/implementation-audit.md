@@ -2,8 +2,6 @@
 
 Audit date: 2026-08-14
 
-> **Status note:** v10.2.2 is the audited first-release baseline. The current branch also includes the private-HTTP Gateway startup and health-timing corrections recorded under **Unreleased** in the changelog; publish those changes as a later patch release rather than moving the existing v10.2.2 tag.
-
 The complete `docker-compose.yml` was inspected as the runtime source of truth, including the embedded Node controller, RPC configurator, Gateway and n8n supervisors, bootstrap shell, and decoded 52-node n8n workflow.
 
 This audit covers the first public release. It verifies the execution controls, portable storage, Portainer lifecycle documentation, partial-volume fail-closed behavior, and automated release checks shipped in v10.2.2.
@@ -24,7 +22,7 @@ This audit covers the first public release. It verifies the execution controls, 
 - Price impact is multiplied by 100 before comparison; default impact is 2%, maximum scenario is 500 USDC, SOL reserve is 0.02, slippage is 1%, and burst policy defaults to collapse.
 - Automatic Gateway token registration verifies by exact mint and uses a deterministic `AUTO_<prefix>_<suffix>` internal symbol.
 - Automatic execution sends the exact per-token assigned wallet to Gateway.
-- The current branch's Gateway supervisor tracks `START_SERVER=true node dist/index.js --dev`, preserving direct PID control while explicitly selecting HTTP on the private, unpublished Docker network.
+- The Gateway supervisor tracks `START_SERVER=true node dist/index.js --dev`, preserving direct PID control while explicitly selecting HTTP on the private, unpublished Docker network.
 - The controller creates Ed25519 material, passes Base58 secret material directly to Gateway, displays it once, and keeps the recovery copy in memory for a limited confirmation window. No key is sent to n8n or ntfy.
 - The workflow contains no `rules_status`, `confirmed_ready`, or RSI execution gate and does not require the source alert's armed/active state.
 - Replay guards, duplicate event IDs, burst suppression, and a single global real-trade lock remain implemented.
