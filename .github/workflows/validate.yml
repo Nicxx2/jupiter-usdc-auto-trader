@@ -18,11 +18,12 @@ jobs:
       GATEWAY_PASSPHRASE: ci-only-placeholder
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
+          package-manager-cache: false
       - name: Verify embedded workflow and safety invariants
         run: node scripts/verify-release.mjs
       - name: Validate Docker Compose
