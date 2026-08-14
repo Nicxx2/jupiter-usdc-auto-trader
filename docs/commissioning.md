@@ -1,6 +1,6 @@
 # Tiny live-trade commissioning
 
-Trading mode is designed to submit real Solana transactions, but no documented end-to-end live trade has yet been completed with this first public release. Use this checklist to commission your installation deliberately and preserve evidence without exposing secrets.
+Every installation depends on its own wallet, RPC provider, token, route, and network conditions. Start in `TESTING`, complete the dry-run checks, then use this checklist to make and verify a deliberately tiny first live trade before using meaningful funds. Preserve the evidence without exposing secrets.
 
 ## Before enabling Trading
 

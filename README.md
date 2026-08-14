@@ -374,7 +374,7 @@ Every controller restart begins in **TESTING** with **MASTER OFF**.
 Enabling `TRADING` requires deliberate typed confirmation and green Trading readiness. `MASTER` must then be enabled separately.
 
 > [!CAUTION]
-> Trading mode is designed to submit real Solana transactions, but no documented end-to-end live trade has yet been completed with this first public release. Start with `TESTING` and `MASTER OFF`. Before using meaningful funds, complete one deliberately tiny trade and verify the Solana signature, exact token mint, selected wallet, and expected balance changes.
+> Trading mode can submit real Solana transactions. Always start in `TESTING` with `MASTER OFF` and complete the dry-run checks. Make the first live trade deliberately tiny, then verify the exact mint, selected wallet, Solana signature, and expected balance changes before using meaningful funds.
 
 ---
 
@@ -384,8 +384,8 @@ Enabling `TRADING` requires deliberate typed confirmation and green Trading read
 | --- | --- |
 | `TESTING` | Validates source configuration and current market quotes but cannot submit a blockchain transaction. |
 | `TRADING` | Permits submission only while every execution safety check still passes. |
-| `MASTER OFF` | Overrides the automation path and blocks alert-driven execution. |
-| `MASTER ON` | Enables eligible AUTO directions; it never replaces Trading mode or safety validation. |
+| <code>MASTER&nbsp;OFF</code> | Blocks all alert-driven trade execution, regardless of Trading mode. |
+| <code>MASTER&nbsp;ON</code> | Allows eligible AUTO directions to execute only when Trading mode and every safety check also pass. |
 
 Material configuration changes return the system to `TESTING` with `MASTER OFF`.
 

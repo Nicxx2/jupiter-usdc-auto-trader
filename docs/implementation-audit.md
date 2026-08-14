@@ -83,6 +83,6 @@ Bootstrap generates and verifies the expected workflow hash, imports and publish
 
 Storage uses project-scoped named volumes, so fresh installations require no host paths. Every controller restart forces `TESTING` and `MASTER OFF`.
 
-## Commissioning claim
+## Per-installation commissioning
 
-Repository verification confirms the transaction-path safeguards but does not prove that an on-chain transaction has completed. First-release documentation therefore requires a deliberately tiny verified live trade before an installation is treated as commissioned.
+Repository verification confirms the transaction-path safeguards, while real execution also depends on each installation's wallet, RPC provider, token, route, and network conditions. The commissioning guide therefore starts in `TESTING` and calls for a deliberately tiny, verified first live trade before meaningful funds are introduced.
