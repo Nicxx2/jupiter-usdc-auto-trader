@@ -2159,9 +2159,9 @@ services:
       - -e
       - fetch('http://127.0.0.1:15888/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
       interval: 20s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
     networks:
     - trading_control
     init: true
@@ -2204,9 +2204,10 @@ services:
       while true; do
         rm -f /gateway-control/restart.request
 
-        # Gateway v2.15.1 package start target is START_SERVER=true node dist/index.js.
         # Track the real Node PID so RPC provider changes always create a fresh Solana instance.
-        START_SERVER=true node dist/index.js &
+        # --dev explicitly selects HTTP; DEV=true is only interpreted by the image's default command,
+        # which this supervisor intentionally replaces.
+        START_SERVER=true node dist/index.js --dev &
         child=$$!
         echo "[gateway-supervisor] Gateway started as PID $$child"
 

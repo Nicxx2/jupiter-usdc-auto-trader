@@ -354,7 +354,7 @@ for (const marker of [
   "rec.status='UNCERTAIN'",
   'state.safetyLock=true',
   'Global trade lock held by',
-  'START_SERVER=true node dist/index.js',
+  'START_SERVER=true node dist/index.js --dev',
   'jupiter-ntfy-event',
   "state.version = '10.2.2'",
 ]) {

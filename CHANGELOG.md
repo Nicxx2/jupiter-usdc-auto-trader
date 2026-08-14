@@ -2,6 +2,14 @@
 
 Notable release changes are recorded here. Versions follow semantic versioning: safety fixes and compatible deployment improvements increment the patch version; incompatible configuration or behavior changes require a larger increment and explicit migration guidance.
 
+## Unreleased
+
+### Deployment hardening
+
+- Fixed the supervised Gateway startup so the pinned v2.15.1 server explicitly uses HTTP on its private, unpublished Docker network instead of entering an HTTPS certificate crash loop.
+- Extended the Gateway startup grace and retry window for slower first installations without delaying a Gateway that becomes healthy sooner.
+- Added Compose regression checks that preserve private-HTTP Gateway startup and the hardened health timing.
+
 ## [10.2.2] - 2026-08-14
 
 ### Initial public release

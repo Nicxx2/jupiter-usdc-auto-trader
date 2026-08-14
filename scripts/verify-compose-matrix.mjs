@@ -161,6 +161,40 @@ function validConfig(label, overrides, expectedPort, expectedUrl, expectedSecure
     }
   }
 
+  const gatewayHealth = model.services?.gateway?.healthcheck;
+  if (!gatewayHealth) fail(`${label} gateway healthcheck is missing`);
+  if (String(gatewayHealth.interval) !== '20s') {
+    fail(`${label} gateway health interval expected 20s, got ${gatewayHealth.interval}`);
+  }
+  if (String(gatewayHealth.timeout) !== '10s') {
+    fail(`${label} gateway health timeout expected 10s, got ${gatewayHealth.timeout}`);
+  }
+  if (Number(gatewayHealth.retries) !== 10) {
+    fail(`${label} gateway health retries expected 10, got ${gatewayHealth.retries}`);
+  }
+  if (!['90s', '1m30s'].includes(String(gatewayHealth.start_period))) {
+    fail(`${label} gateway health start period expected 90s, got ${gatewayHealth.start_period}`);
+  }
+  const gatewayHealthTest = Array.isArray(gatewayHealth.test)
+    ? gatewayHealth.test.join(' ')
+    : String(gatewayHealth.test || '');
+  if (!gatewayHealthTest.includes("fetch('http://127.0.0.1:15888/')")) {
+    fail(`${label} Gateway healthcheck must probe its internal HTTP root`);
+  }
+
+  const gatewayCommand = Array.isArray(model.services?.gateway?.command)
+    ? model.services.gateway.command.join('\n')
+    : String(model.services?.gateway?.command || '');
+  if (!gatewayCommand.includes('START_SERVER=true node dist/index.js --dev')) {
+    fail(`${label} Gateway must start the tracked Node process explicitly in private HTTP mode`);
+  }
+  if (String(model.services?.gateway?.environment?.DEV) !== 'true') {
+    fail(`${label} Gateway DEV environment marker must remain true`);
+  }
+  if (String(controller.environment?.GATEWAY_URL) !== 'http://gateway:15888') {
+    fail(`${label} controller Gateway URL must remain on the private HTTP service endpoint`);
+  }
+
   const published = Object.values(model.services || {}).flatMap((service) => service.ports || []);
   if (published.length !== 1 || String(published[0].published) !== '5680' || Number(published[0].target) !== 5680) {
     fail(`${label} expected only published port 5680:5680`);

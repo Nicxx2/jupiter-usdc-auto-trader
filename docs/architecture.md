@@ -64,10 +64,10 @@ n8n never embeds or independently resolves the external source URL. Its initial 
 Gateway is started as the actual server process:
 
 ```text
-START_SERVER=true node dist/index.js
+START_SERVER=true node dist/index.js --dev
 ```
 
-The supervisor tracks that Node PID. An RPC change is preflighted by the internal configurator, written directly to persistent Gateway YAML, and followed by a signal that terminates the actual server. The supervisor waits, force-stops after its timeout if necessary, starts a fresh process, and the controller verifies the requested provider from live Gateway status.
+The explicit `--dev` selects HTTP because Gateway is reachable only through the private `trading_control` Docker network; port 15888 is never published to the host. It does not affect Testing versus Trading mode, which is enforced separately by the controller. The supervisor tracks that Node PID. An RPC change is preflighted by the internal configurator, written directly to persistent Gateway YAML, and followed by a signal that terminates the actual server. The supervisor waits, force-stops after its timeout if necessary, starts a fresh process, and the controller verifies the requested provider from live Gateway status.
 
 The configurator authentication token is generated inside the private `gateway_control` volume, mounted only into the controller/configurator path, and not supplied by the user.
 

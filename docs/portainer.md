@@ -137,6 +137,12 @@ In the stack's container list:
 - `postgres`, `n8n`, `n8n-runner`, `gateway`, `rpc-configurator`, and `trading-controller` should remain running.
 - Health-gated services may show waiting/starting while initialization completes.
 
+On slower hardware, the Gateway health gate allows roughly five to six minutes for startup but proceeds immediately after the first successful response. If Portainer still reports that Gateway is unhealthy after that window, inspect the `gateway` and `gateway-init` logs; repeated deployment attempts or a longer wait will not repair a process or configuration error.
+
+If the Gateway log mentions a missing `./certs/server_key.pem`, the stack is using an older Compose revision that incorrectly entered HTTPS mode. Update the Web editor from the current repository Compose and redeploy. Do not add certificate files or expose Gateway port 15888; Gateway HTTP remains isolated inside the private Docker network.
+
+Gateway may label the corrected connection as development or unsafe HTTP in its own log. That wording describes the unencrypted internal transport, not the trader's Testing/Trading mode; it is expected while port 15888 remains unpublished.
+
 If the stack fails immediately, first check Portainer's deployment error for a missing required environment variable.
 
 ## 6. Sign in

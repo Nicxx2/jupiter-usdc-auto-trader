@@ -75,7 +75,11 @@ If the controller repeatedly restarts, inspect its log for a rejected port or UR
 
 ## Gateway or quote readiness fails
 
+- The Gateway health gate allows roughly five to six minutes on slower first starts and succeeds immediately when Gateway responds. If it reaches `unhealthy`, inspect `gateway` and `gateway-init` logs rather than repeatedly redeploying.
 - Confirm `gateway-init` completed successfully and `gateway` is healthy.
+- `ENOENT ... ./certs/server_key.pem` means Gateway was started in HTTPS mode by an older Compose revision. Update to the corrected Compose and redeploy the stack. Do not create certificates or publish Gateway port 15888; the current stack explicitly uses HTTP only on its private Docker network.
+- Gateway may describe this as development or unsafe HTTP in its own log. That message refers only to transport encryption; it is expected here because the endpoint is confined to the Docker network and is unrelated to the dashboard's Testing/Trading control.
+- `bigint: Failed to load bindings, pure JS will be used` is a harmless Gateway fallback warning and is not the cause of an unhealthy container.
 - If `gateway-init` reports a non-empty/partial configuration volume, do not rerun defaults over it. Restore the complete `gateway_conf` backup or inspect the volume for missing `root.yml`, `server.yml`, `apiKeys.yml`, and Solana chain files.
 - Use the dashboard RPC manager rather than hand-editing YAML.
 - Public Solana RPC is allowed for Testing but cannot make Trading Ready green.
