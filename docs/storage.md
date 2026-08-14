@@ -1,4 +1,4 @@
-# Storage, backup, restore, and migration
+# Storage, backup, and restore
 
 ## What happens automatically
 
@@ -134,65 +134,3 @@ done
 ```
 
 Do not use the restore loop against the only copy of a running production installation. A restore is a deliberate disaster-recovery operation into empty volumes.
-
-## One-time migration from the legacy `/Configs` layout
-
-Older private builds used absolute bind paths under `/Configs`. The named-volume release cannot silently adopt those directories: Docker sees the new volumes as a fresh installation until the old data is copied. This is expected and does **not** mean the old data was deleted.
-
-Migrate before starting the named-volume release:
-
-1. In the old dashboard, select `TESTING`, turn `MASTER` off, and stop the old stack.
-2. Make a secure backup/snapshot of the complete old `/Configs` tree and record the four existing secrets.
-3. Keep the old directories untouched for rollback.
-4. Place the new `docker-compose.yml` and a private `.env` containing the original four secrets on the Docker host.
-5. Use the same project/Portainer stack name and run `docker compose --project-name ACTUAL_EXISTING_STACK_NAME create`. This creates the named volumes without starting the application. For the recommended default, `ACTUAL_EXISTING_STACK_NAME` is `jupiter-usdc-auto-trader`.
-6. Copy each legacy directory to its matching **empty** volume using the mapping below.
-7. Start the new stack, remain in `TESTING`/`MASTER OFF`, and verify login, source, RPC, wallets, wallet-backup confirmations, audit/trade history, and safety/replay state.
-8. Keep the legacy backup until a restore test and deliberately tiny commissioning check have succeeded.
-
-| Legacy directory | Named volume |
-| --- | --- |
-| `/Configs/n8n/postgres` | `postgres_data` |
-| `/Configs/n8n/data` | `n8n_data` |
-| `/Configs/n8n/bootstrap` | `bootstrap_data` |
-| `/Configs/n8n/trading-controller` | `controller_data` |
-| `/Configs/n8n/gateway-control` | `gateway_control` |
-| `/Configs/hummingbot-gateway/conf` | `gateway_conf` |
-| `/Configs/hummingbot-gateway/logs` | `gateway_logs` |
-
-Example copy helper for a Linux Docker host:
-
-```sh
-set -eu
-PROJECT_NAME=jupiter-usdc-auto-trader
-# Change PROJECT_NAME if the legacy Portainer stack used a different name.
-LEGACY_ROOT=/Configs
-
-copy_legacy() {
-  VOLUME_KEY="$1"
-  RELATIVE_SOURCE="$2"
-  VOLUME_NAME="$(docker volume ls \
-    --filter "label=com.docker.compose.project=$PROJECT_NAME" \
-    --filter "label=com.docker.compose.volume=$VOLUME_KEY" \
-    --format '{{.Name}}')"
-  test -n "$VOLUME_NAME" || { echo "Missing volume: $VOLUME_KEY" >&2; exit 1; }
-  test "$(printf '%s\n' "$VOLUME_NAME" | wc -l)" -eq 1 || { echo "Ambiguous volume: $VOLUME_KEY" >&2; exit 1; }
-  test -d "$LEGACY_ROOT/$RELATIVE_SOURCE" || { echo "Missing source: $RELATIVE_SOURCE" >&2; exit 1; }
-
-  docker run --rm \
-    --mount "type=bind,src=$LEGACY_ROOT/$RELATIVE_SOURCE,dst=/source,readonly" \
-    --mount "type=volume,src=$VOLUME_NAME,dst=/target" \
-    alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce \
-    sh -c 'test -z "$(ls -A /target)" || { echo "Destination is not empty" >&2; exit 1; }; cp -a /source/. /target/'
-}
-
-copy_legacy postgres_data n8n/postgres
-copy_legacy n8n_data n8n/data
-copy_legacy bootstrap_data n8n/bootstrap
-copy_legacy controller_data n8n/trading-controller
-copy_legacy gateway_control n8n/gateway-control
-copy_legacy gateway_conf hummingbot-gateway/conf
-copy_legacy gateway_logs hummingbot-gateway/logs
-```
-
-The helper preserves ownership and refuses to merge into a non-empty volume. It reads but does not modify the legacy directories. Legacy migration requires Docker-host/SSH access or an equivalent trusted volume-migration tool; normal new Portainer installs and future in-place updates do not.

@@ -4,7 +4,7 @@ The reference v10.2.2 deployment has not yet recorded a proven end-to-end real t
 
 ## Before enabling Trading
 
-- Back up all seven named volumes and the stable four secrets through a secure process. Use an application-consistent method or stop the stack before a complete file-level volume backup; a raw archive of the live PostgreSQL volume is not reliable. See [Storage, backup, restore, and migration](storage.md).
+- Back up all seven named volumes and the stable four secrets through a secure process. Use an application-consistent method or stop the stack before a complete file-level volume backup; a raw archive of the live PostgreSQL volume is not reliable. See [Storage, backup, and restore](storage.md).
 - Configure the Jupiter Alerts source with `APP_API_PORT` for the same server or `APP_API_URL` for a different server, then verify the source check through **Quick Test Everything**.
 - Restrict dashboard port 5680 to a trusted LAN, Tailscale, or protected HTTPS reverse proxy.
 - Change the generated first-run dashboard password.

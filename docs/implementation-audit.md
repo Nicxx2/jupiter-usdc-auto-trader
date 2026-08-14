@@ -4,7 +4,7 @@ Audit date: 2026-08-14
 
 The complete `docker-compose.yml` was inspected as the runtime source of truth, including the embedded Node controller, RPC configurator, Gateway and n8n supervisors, bootstrap shell, and decoded 52-node n8n workflow.
 
-v10.2.2 builds on the v10.2.1 endpoint/topic/security revision with portable storage, Portainer lifecycle documentation, partial-volume fail-closed behavior, and stronger release checks. It does not change BUY/SELL calculations, execution authorization, wallet selection, risk caps, balance requirements, replay handling, or uncertain-transaction behavior.
+This audit covers the first public release. It verifies the execution controls, portable storage, Portainer lifecycle documentation, partial-volume fail-closed behavior, and automated release checks shipped in v10.2.2.
 
 ## Confirmed runtime and safety behavior
 
@@ -13,7 +13,7 @@ v10.2.2 builds on the v10.2.1 endpoint/topic/security revision with portable sto
 - Seven project-scoped Docker named volumes replace host-specific binds; all 15 persistent mounts use `volume.nocopy: true`, and no fixed host-global container names remain.
 - Gateway initialization accepts a genuinely empty volume or a complete existing configuration, but fails closed on partial/non-empty state instead of running defaults over potentially restored wallet/RPC data.
 - The n8n permissions initializer retains the UID 1000 ownership/write fix.
-- Bootstrap now generates workflow ID `JATCommunity1022`, verifies SHA-256 `fde708e7cd81ca57016a3cb60fa828acfb37f29e08f7e53a2998f3232713e13b`, verifies publication, performs the restart request/acknowledgement, and verifies health. Its success marker is written only after that sequence completes, so a late failure remains retryable.
+- Bootstrap generates workflow ID `JATCommunity1022`, verifies SHA-256 `d9cdd129533546d7c0ab4178eb9cb8a4dd517f55da5be43be930b43c5a677848`, verifies publication, performs the restart request/acknowledgement, and verifies health. Its success marker is written only after that sequence completes, so a late failure remains retryable.
 - The production webhook remains `jupiter-ntfy-event`, and readiness probes that webhook rather than relying only on `/healthz`.
 - Both BUY and SELL execution bodies retain whitespace between the nested quote close and outer object close, preserving the n8n expression-parser fix.
 - Controller startup forces `TESTING` and `MASTER OFF`; unresolved persisted submissions become `UNCERTAIN` and engage the safety lock.
@@ -28,22 +28,20 @@ v10.2.2 builds on the v10.2.1 endpoint/topic/security revision with portable sto
 - Replay guards, duplicate event IDs, burst suppression, and a single global real-trade lock remain implemented.
 - No automatic retry occurs after ambiguous submission.
 
-## v10.2.2 deployment and persistence changes
+## Deployment and persistence
 
-- Replaced host-specific `/Configs` binds with seven automatically created, project-scoped named volumes.
+- Standardized persistent storage on seven automatically created, project-scoped named volumes.
 - Added a stable default Compose project name while preserving Portainer/CLI override precedence.
 - Removed fixed host-global container names.
-- Added stopped-stack backup, checksum verification, clean-host restore, and legacy migration guidance.
+- Added stopped-stack backup, checksum verification, and clean-host restore guidance.
 - Added fail-closed detection for partial Gateway configuration volumes.
 - Expanded the Compose matrix to enforce storage, network, dependency, restart, secret, and published-port invariants.
 
-## v10.2 findings inherited from v10.2.1
+## Endpoint, topic, and deployment hardening
 
 ### One canonical configurable Jupiter Alerts endpoint
 
-v10.2 passed `APP_API_URL` to the controller, but three embedded n8n nodes were fixed to `http://host.docker.internal:8000/api/tokens`. A custom endpoint could therefore make controller and workflow validation read different sources.
-
-v10.2.1 resolves this without exposing another port or requiring manual n8n changes:
+The controller and all three embedded n8n source-state nodes use one canonical endpoint without exposing another port or requiring manual n8n changes:
 
 - `APP_API_PORT` supports the Jupiter Alerts application on the same Docker host and defaults to 8000.
 - A non-empty complete `APP_API_URL` supports another server and overrides the port setting.
@@ -51,19 +49,17 @@ v10.2.1 resolves this without exposing another port or requiring manual n8n chan
 - The controller exposes a read-only Docker-private `/internal/source-state` proxy.
 - All three n8n app-state nodes call that proxy, so initial and final validation always use the controller's same configured source.
 
-The default remains exactly `http://host.docker.internal:8000/api/tokens`, preserving normal v10.2 deployment behavior.
+The default is `http://host.docker.internal:8000/api/tokens`.
 
 ### Canonical effective ntfy topic
 
-v10.2 subscription refresh preferred `token.ntfy_topic`, while authorization preferred `summary.ntfy_effective_topic`. They normally agree, but conflicting non-empty fields could cause a missed alert.
-
-v10.2.1 uses the existing `currentEffectiveTopic()` helper for subscription and validation. This is an availability/consistency fix; the exact-mint and current-topic safety checks remain unchanged.
+Subscription and validation both use the canonical `currentEffectiveTopic()` helper. Exact-mint and current-topic safety checks remain independent requirements.
 
 ### Missing secrets fail before deployment
 
 The four persistent secrets now use Compose required-value interpolation. Missing or empty values produce a clear configuration/deployment error rather than allowing containers to receive blank credentials and fail later.
 
-The values must still remain stable for existing installations.
+The values must remain stable for the lifetime of an installation.
 
 ### Release and reverse-proxy hardening
 
@@ -81,11 +77,11 @@ The release verifier syntax-compiles the embedded controller, configurator, five
 
 A malformed endpoint prevents the controller from starting and is visible in its logs. A syntactically valid but unreachable endpoint leaves source/readiness checks red and trading unavailable.
 
-## Upgrade behavior
+## Bootstrap and restart behavior
 
-The workflow marker/hash and identity changed for the v10.2.2 release. On an existing v10.2.1 installation, bootstrap detects the new expected hash, unpublishes the prior Jupiter Auto Trader workflow by its controlled name/webhook identity, imports/publishes `JATCommunity1022`, requests the established n8n supervisor restart, and verifies the published production webhook. Unrelated n8n workflows are not selected by ID/name/webhook matching.
+Bootstrap generates and verifies the expected workflow hash, imports and publishes `JATCommunity1022`, requests the n8n supervisor restart, and verifies the production webhook. Workflow cleanup is limited to the controlled Jupiter Auto Trader name and webhook identity; unrelated n8n workflows are not selected.
 
-The controller state schema is unchanged. Storage now uses project-scoped named volumes, so existing `/Configs` installations require the documented one-time stopped-stack copy before first start of this release; the old directories are not modified automatically. New installations require no host paths. Restart safety still forces `TESTING` and `MASTER OFF`.
+Storage uses project-scoped named volumes, so fresh installations require no host paths. Every controller restart forces `TESTING` and `MASTER OFF`.
 
 ## Commissioning claim
 

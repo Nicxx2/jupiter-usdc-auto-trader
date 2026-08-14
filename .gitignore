@@ -26,13 +26,6 @@ private-key*
 wallet-recovery*
 
 # Local copies of persistent runtime data
-/Configs/
-/data/
-/logs/
-/postgres/
-/n8n-data/
-/gateway-conf/
-/gateway-control/
 /postgres_data/
 /n8n_data/
 /bootstrap_data/

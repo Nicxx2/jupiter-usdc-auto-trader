@@ -143,6 +143,16 @@ if (existsSync('README.md')) {
   const summaries = (readme.match(/<summary(?:\s[^>]*)?>/g) || []).length;
   check(detailsOpen === detailsClose, `README collapsibles are unbalanced: ${detailsOpen} open, ${detailsClose} close`);
   check(detailsOpen === summaries, `README collapsibles need one summary each: ${detailsOpen} details, ${summaries} summaries`);
+  const licensePosition = readme.indexOf('## 📄 License & Risk');
+  const supportPosition = readme.indexOf('## 💖 Support This Project');
+  check(
+    licensePosition >= 0 && supportPosition > licensePosition,
+    'README Support This Project section must follow License & Risk',
+  );
+  check(
+    readme.trimEnd().endsWith('[![Support on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/nicxx2)'),
+    'README Support This Project section must be the final content',
+  );
 }
 
 if (existsSync('CHANGELOG.md')) {
@@ -318,7 +328,6 @@ const persistentVolumes = [
 for (const volume of persistentVolumes) {
   check(new RegExp(`^  ${volume}:$`, 'm').test(compose), `named volume declaration missing: ${volume}`);
 }
-check(!compose.includes('/Configs'), 'Compose contains a host-specific /Configs bind path');
 check(!/^\s+container_name:/m.test(compose), 'Compose contains a host-global fixed container name');
 check((compose.match(/^\s+nocopy:\s+true$/gm) || []).length === 15, 'every persistent mount must explicitly use volume.nocopy');
 
@@ -368,18 +377,24 @@ if (b64Match) {
   check(Boolean(expectedHash), 'bootstrap EXPECTED_HASH is missing');
 
   if (workflow) {
+    check(workflow.name === 'Jupiter Auto Trader v10.2.2 - Community Internal', 'embedded workflow template name is stale');
+    check(workflow.id === 'JATCommunity1022', 'embedded workflow template ID is stale');
     workflow.name = 'Jupiter Auto Trader v10.2.2 - Community Internal';
     workflow.id = 'JATCommunity1022';
     const sourceNames = new Set(['Get Jupiter App State', 'BUY Final App State', 'SELL Final App State']);
     for (const node of workflow.nodes || []) {
       if (sourceNames.has(node?.name)) node.parameters.url = 'http://trading-controller:8080/internal/source-state';
       if (node?.name === 'Architecture / Safety') {
-        node.parameters.content = String(node.parameters.content || '')
-          .replace('## V10 COMMUNITY FINAL', '## V10.2.2 COMMUNITY FINAL')
-          .replace(
-            '**v10.1.1:** fixes n8n expression parsing',
-            '**v10.2.2 release:** adds portable Docker-managed storage, fail-closed Gateway volume initialization, and configurable same-server or remote Jupiter Alerts endpoints.\n\n**Workflow safety fix retained from v10.1.1:** fixes n8n expression parsing',
-          );
+        node.parameters.content = [
+          '## Jupiter USDC Auto Trader v10.2.2',
+          'Controller: **http://<server>:5680**',
+          '',
+          'First public release. Safe defaults: TESTING, MASTER OFF, new token automation OFF, no wallet assignment, and public RPC for testing only. The dashboard supports Helius or a custom Solana RPC for Testing and Trading.',
+          '',
+          'Execution safety: exact mint, topic, and target validation; repeated Gateway target and price-impact checks; maximum USDC cap; per-token wallet assignment; live balances and SOL reserve; final executable quote; global trade lock; trigger guards; and uncertain-transaction lockout.',
+          '',
+          'BUY and SELL execution expressions include the required n8n parser-safe object spacing and are verified by the release checks.',
+        ].join('\n');
       }
     }
 
@@ -392,7 +407,7 @@ if (b64Match) {
 
     const byName = new Map(workflow.nodes.map((node) => [node.name, node]));
     check(
-      String(byName.get('Architecture / Safety')?.parameters?.content || '').startsWith('## V10.2.2 COMMUNITY FINAL'),
+      String(byName.get('Architecture / Safety')?.parameters?.content || '').startsWith('## Jupiter USDC Auto Trader v10.2.2'),
       'workflow Architecture / Safety note has a stale release version',
     );
     check(byName.get('NTFY Alert')?.parameters?.path === 'jupiter-ntfy-event', 'production webhook path changed');

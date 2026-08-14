@@ -12,8 +12,6 @@ The Compose uses project-scoped service names, networks, and named volumes. Its 
 
 Portainer supports pasting a Compose file into its Web editor and defining environment variables separately, so updating a value does not require editing the Compose. See Portainer's official [Add a new stack](https://docs.portainer.io/sts/user/docker/stacks/add) documentation.
 
-> **Legacy upgrade warning:** if the existing deployment stores data under `/Configs`, do not update/start this named-volume Compose until completing the [one-time legacy migration](storage.md#one-time-migration-from-the-legacy-configs-layout). The new volumes start empty and are not automatically populated from old host directories.
-
 ## 1. Generate the four stable secrets
 
 Run this four times on a trusted machine and keep each result private:
@@ -178,6 +176,6 @@ Before updating:
 
 After updating, wait for bootstrap completion and rerun **Quick Test Everything**. Every controller restart automatically returns to `TESTING` and `MASTER OFF`.
 
-Normal stack/container updates reuse the volumes. Never delete the volumes in Portainer, and never use `docker compose down -v` / `down --volumes`; those actions permanently remove durable state. See [Storage, backup, restore, and migration](storage.md), including the required one-time procedure for an older `/Configs` installation.
+Normal stack/container updates reuse the volumes. Never delete the volumes in Portainer, and never use `docker compose down -v` / `down --volumes`; those actions permanently remove durable state. See [Storage, backup, and restore](storage.md).
 
 Restrict access to Portainer itself. Anyone who can administer this stack may be able to view/change its environment variables, replace the Compose, access container logs/consoles, or read/alter persistent volumes.

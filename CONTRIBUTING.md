@@ -6,7 +6,7 @@ Changes are welcome, but this repository controls software that can move real fu
 
 - Read `docker-compose.yml` in full, including the embedded controller, RPC configurator, Gateway supervisor, n8n bootstrap, and Base64 workflow.
 - Preserve pinned money-moving infrastructure versions unless the change is specifically a tested upgrade.
-- Preserve the seven project-scoped named-volume mappings, `volume.nocopy` behavior, and documented legacy `/Configs` migration compatibility.
+- Preserve the seven project-scoped named-volume mappings, `volume.nocopy` behavior, and documented backup and restore compatibility.
 - Do not weaken exact-mint identity, fresh source rechecks, per-token wallet assignment, balance/reserve checks, quote/impact limits, replay guards, the global trade lock, or uncertain-transaction safety lock.
 - Do not add Action Readiness, Action Rules, RSI, or similar informational source fields as trading gates.
 - Never automatically retry an uncertain submission or silently reduce a trade because funds are insufficient.

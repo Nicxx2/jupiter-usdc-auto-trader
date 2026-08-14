@@ -5,14 +5,6 @@
 
 ---
 
-## 💖 Support This Project
-
-If you find this project helpful and want to support what I do, you can leave a tip here — thank you!
-
-[![Support on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/nicxx2)
-
----
-
 # 🤖 Jupiter USDC Auto Trader v10.2.2
 
 **Self-hosted guarded Solana execution for Jupiter USDC Price Alerts.**
@@ -244,9 +236,6 @@ Before deploying, install and run [Jupiter USDC Price Alerts](https://github.com
 
 > [!IMPORTANT]
 > Docker creates the persistent volumes automatically. Keep the Portainer stack name (or Compose project name) unchanged for the lifetime of the installation: changing it selects a different, empty volume namespace and looks like a fresh install. Never delete the stack's volumes or run `docker compose down --volumes` / `down -v` unless permanent data destruction is intended.
-
-> [!CAUTION]
-> **Updating an older private `/Configs` deployment?** Stop before deploying this Compose. Preserve the original four secrets and follow the [one-time migration procedure](docs/storage.md#one-time-migration-from-the-legacy-configs-layout). Starting first creates an empty named-volume installation; it does not import or delete the legacy data.
 
 <details open>
 <summary><strong>🧩 Portainer — copy/paste deployment</strong></summary>
@@ -514,7 +503,7 @@ Back up all seven named volumes while the stack is stopped (or use an applicatio
 
 Compose/Portainer prefixes physical volume names with the project/stack name and reuses them during normal updates and container recreation. The file supplies `jupiter-usdc-auto-trader` as the stable CLI default; Portainer's stack name overrides it. A normal `docker compose down` preserves volumes; `down -v`, named-volume pruning, and explicit volume deletion do not.
 
-➡️ [Storage, backup, restore, and legacy `/Configs` migration guide](docs/storage.md)
+➡️ [Storage, backup, and restore guide](docs/storage.md)
 
 </details>
 
@@ -538,7 +527,7 @@ These money-moving infrastructure versions are pinned by readable release tag **
 
 - 📋 [Release changelog](CHANGELOG.md)
 - 🧩 [Deploying with Portainer](docs/portainer.md)
-- 💾 [Storage, backup, restore, and legacy migration](docs/storage.md)
+- 💾 [Storage, backup, and restore](docs/storage.md)
 - 🏗️ [Architecture and automatic bootstrap](docs/architecture.md)
 - 🧪 [Commissioning a tiny live trade](docs/commissioning.md)
 - 🔎 [v10.2.2 implementation audit](docs/implementation-audit.md)
@@ -577,3 +566,11 @@ node scripts/verify-compose-matrix.mjs
 Licensed under the [MIT License](LICENSE).
 
 This software is provided without warranty. It is not financial advice, and self-hosting does not remove smart-contract, token, RPC, infrastructure, key-management, or operational risk.
+
+---
+
+## 💖 Support This Project
+
+If you find this project helpful and want to support what I do, you can leave a tip here — thank you!
+
+[![Support on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/nicxx2)

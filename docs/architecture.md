@@ -45,7 +45,7 @@ Three isolated bridge networks limit normal service reachability:
 6. The bootstrap writes a restart request. The n8n supervisor restarts the actual n8n child, acknowledges the requested workflow hash, and returns healthy.
 7. The runner and controller start only after bootstrap completion and required health checks.
 
-The v10.2.2 workflow identity is `JATCommunity1022` and its generated SHA-256 is `fde708e7cd81ca57016a3cb60fa828acfb37f29e08f7e53a2998f3232713e13b`. Bootstrap deterministically upgrades the embedded audited template with the v10.2.2 identity, release note, and controller source-proxy URLs, verifies that exact hash, and only then imports it. `scripts/verify-release.mjs` performs the same deterministic verification before release.
+The v10.2.2 workflow identity is `JATCommunity1022` and its generated SHA-256 is `d9cdd129533546d7c0ab4178eb9cb8a4dd517f55da5be43be930b43c5a677848`. Bootstrap deterministically prepares the embedded audited template with the v10.2.2 identity, first-release note, and controller source-proxy URLs, verifies that exact hash, and only then imports it. `scripts/verify-release.mjs` performs the same deterministic verification before release.
 
 ## Source API configuration
 
@@ -95,4 +95,4 @@ The runtime uses seven Docker-managed, project-scoped named volumes rather than 
 
 Compose service names are used only for Docker-private discovery; there are no fixed host-global container names. The project/stack name scopes networks and physical volume names. Changing that name selects a different storage namespace, so operators must keep it stable.
 
-All seven volumes and the stable four environment secrets are required for a faithful restore. They should never be copied into this repository. See [Storage, backup, restore, and migration](storage.md).
+All seven volumes and the stable four environment secrets are required for a faithful restore. They should never be copied into this repository. See [Storage, backup, and restore](storage.md).

@@ -31,9 +31,9 @@ CONTROLLER_VOLUME="$(docker volume ls \
 test -n "$CONTROLLER_VOLUME"
 test "$(printf '%s\n' "$CONTROLLER_VOLUME" | wc -l)" -eq 1
 docker run --rm \
-  --mount "type=volume,src=$CONTROLLER_VOLUME,dst=/data" \
+  --mount "type=volume,src=$CONTROLLER_VOLUME,dst=/controller-state" \
   alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce \
-  sh -c 'set -eu; test -f /data/auth.json; mv /data/auth.json "/data/auth.json.recovery.$(date +%s)"'
+  sh -c 'set -eu; test -f /controller-state/auth.json; mv /controller-state/auth.json "/controller-state/auth.json.recovery.$(date +%s)"'
 ```
 
 Start the stack, retrieve the newly generated first-run password from `trading-controller` logs, and change it immediately. This creates a new session secret and invalidates old sessions while preserving execution/safety state. Keep the recovery file private until access is confirmed, then dispose of it through your normal secret-handling process.
@@ -76,7 +76,7 @@ If the controller repeatedly restarts, inspect its log for a rejected port or UR
 ## Gateway or quote readiness fails
 
 - Confirm `gateway-init` completed successfully and `gateway` is healthy.
-- If `gateway-init` reports a non-empty/partial configuration volume, do not rerun defaults over it. Restore the complete `gateway_conf` backup or inspect the migration for missing `root.yml`, `server.yml`, `apiKeys.yml`, and Solana chain files.
+- If `gateway-init` reports a non-empty/partial configuration volume, do not rerun defaults over it. Restore the complete `gateway_conf` backup or inspect the volume for missing `root.yml`, `server.yml`, `apiKeys.yml`, and Solana chain files.
 - Use the dashboard RPC manager rather than hand-editing YAML.
 - Public Solana RPC is allowed for Testing but cannot make Trading Ready green.
 - Verify Helius/custom credentials privately; never paste them into an issue or n8n.
@@ -109,4 +109,4 @@ Reset replay guards only in `TESTING` with `MASTER OFF`, and only after intentio
 
 ## Restores and changed secrets
 
-An existing installation requires its original `N8N_DB_PASSWORD`, `N8N_ENCRYPTION_KEY`, `N8N_RUNNERS_AUTH_TOKEN`, and `GATEWAY_PASSPHRASE`. Changing them can break database access, runner authentication, n8n encrypted data, or Gateway wallet access. Restore the stable secrets alongside all seven named volumes. Follow [Storage, backup, restore, and migration](storage.md); do not merge a backup into partly initialized volumes.
+An existing installation requires its original `N8N_DB_PASSWORD`, `N8N_ENCRYPTION_KEY`, `N8N_RUNNERS_AUTH_TOKEN`, and `GATEWAY_PASSPHRASE`. Changing them can break database access, runner authentication, n8n encrypted data, or Gateway wallet access. Restore the stable secrets alongside all seven named volumes. Follow [Storage, backup, and restore](storage.md); do not merge a backup into partly initialized volumes.
