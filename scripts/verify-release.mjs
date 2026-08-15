@@ -6,6 +6,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 const requiredFiles = [
   'docker-compose.yml',
+  'package.json',
   'README.md',
   'CHANGELOG.md',
   '.env.example',
@@ -34,6 +35,15 @@ const requiredFiles = [
   'docs/troubleshooting.md',
   'scripts/verify-compose-matrix.mjs',
   'scripts/verify-release.mjs',
+  'tests/README.md',
+  'tests/controller-inputs.test.mjs',
+  'tests/controller-persistence.test.mjs',
+  'tests/controller-safety.test.mjs',
+  'tests/gateway-rpc.test.mjs',
+  'tests/workflow-execution.test.mjs',
+  'tests/fixtures/controller-state.mjs',
+  'tests/helpers/compose-source.mjs',
+  'tests/helpers/workflow-source.mjs',
 ];
 
 const failures = [];
@@ -62,6 +72,33 @@ function githubHeadingIds(markdown) {
 }
 
 for (const path of requiredFiles) check(existsSync(path), `missing required file: ${path}`);
+
+if (existsSync('package.json')) {
+  try {
+    const packageJson = JSON.parse(readFileSync('package.json', 'utf8'));
+    check(packageJson.private === true, 'test package must remain private and non-publishable');
+    check(packageJson.version === '10.2.3', 'test package version is not v10.2.3');
+    check(
+      packageJson.scripts?.test === 'node --test --test-concurrency=1',
+      'dependency-free regression test command changed',
+    );
+    check(
+      !packageJson.dependencies && !packageJson.devDependencies,
+      'regression tests must remain dependency-free',
+    );
+  } catch (error) {
+    failures.push(`package.json is invalid: ${error.message}`);
+  }
+}
+
+if (existsSync('.github/workflows/validate.yml')) {
+  const validationWorkflow = readFileSync('.github/workflows/validate.yml', 'utf8');
+  check(
+    validationWorkflow.includes('- name: Run controller regression tests') &&
+      validationWorkflow.includes('run: npm test'),
+    'GitHub validation does not run the behavior regression suite',
+  );
+}
 
 for (const screenshotPath of requiredFiles.filter((path) => path.startsWith('docs/images/dashboard-'))) {
   if (!existsSync(screenshotPath)) continue;
@@ -100,8 +137,13 @@ for (const markdownPath of markdownFiles) {
 
 if (existsSync('README.md')) {
   const readme = readFileSync('README.md', 'utf8');
-  check(readme.includes('# 🤖 Jupiter USDC Auto Trader v10.2.2'), 'README release heading is not v10.2.2');
-  check(readme.includes('**Current release:** `v10.2.2`'), 'README current-release marker is not v10.2.2');
+  check(readme.includes('# 🤖 Jupiter USDC Auto Trader v10.2.3'), 'README release heading is not v10.2.3');
+  check(readme.includes('**Current release:** `v10.2.3`'), 'README current-release marker is not v10.2.3');
+  check(
+    readme.includes('[Regression test design and change rules](tests/README.md)') &&
+      readme.includes('npm test'),
+    'README does not expose the behavior regression suite',
+  );
   check(
     readme.includes('https://github.com/Nicxx2/jupiter-usdc-price-alerts') &&
       readme.includes('**optional execution companion**') &&
@@ -157,7 +199,7 @@ if (existsSync('README.md')) {
 
 if (existsSync('CHANGELOG.md')) {
   const changelog = readFileSync('CHANGELOG.md', 'utf8');
-  const currentReleaseStart = changelog.indexOf('## [10.2.2] - 2026-08-14');
+  const currentReleaseStart = changelog.indexOf('## [10.2.3] - 2026-08-15');
   check(currentReleaseStart >= 0, 'CHANGELOG current release entry is missing');
   const nextReleaseStart = currentReleaseStart >= 0
     ? changelog.indexOf('\n## [', currentReleaseStart + 1)
@@ -167,8 +209,11 @@ if (existsSync('CHANGELOG.md')) {
     : '';
   check(currentRelease.includes('JATCommunity1022'), 'CHANGELOG workflow release identity is missing');
   check(
-    currentRelease.includes('explicitly uses HTTP on its private, unpublished Docker network'),
-    'CHANGELOG current release does not include the Gateway startup correction',
+    currentRelease.includes('immediately before the global lock and transaction submission') &&
+      currentRelease.includes('mainnet-beta genesis hash') &&
+      currentRelease.includes('exact requested endpoint fingerprint') &&
+      currentRelease.includes('bounded Docker `local` logging'),
+    'CHANGELOG current release does not include the v10.2.3 hardening summary',
   );
 }
 
@@ -200,6 +245,7 @@ if (existsSync('.gitignore')) {
 const compose = readFileSync('docker-compose.yml', 'utf8').replaceAll('\r\n', '\n');
 check(compose.startsWith('name: jupiter-usdc-auto-trader\n'), 'stable default Compose project name is missing');
 check(!/^\s+type:\s+bind\s*$/m.test(compose), 'Compose contains a host bind mount');
+check(!/(?<!\$)\$\{[a-z_]/.test(compose), 'embedded runtime interpolation contains an unescaped dollar sign');
 
 const expectedComposeVariables = [
   'APP_API_PORT',
@@ -319,6 +365,63 @@ check(compose.includes("u.pathname==='/internal/source-state'"), 'controller sou
 check(compose.includes('const topic=currentEffectiveTopic(data,t.mint).trim();'), 'ntfy subscription does not use the canonical effective-topic helper');
 check(compose.includes('configuration volume is non-empty but root.yml is missing'), 'Gateway partial-volume overwrite guard is missing');
 check(compose.includes('required Gateway configuration is missing or empty'), 'Gateway configuration completeness guard is missing');
+check((compose.match(/^    logging: \*default-logging$/gm) || []).length === 9, 'every service must use bounded default logging');
+check(compose.includes('driver: local') && compose.includes('max-size: 10m') && compose.includes("max-file: '3'"), 'bounded local logging policy changed');
+check(compose.includes('stop_grace_period: 60s'), 'PostgreSQL graceful-stop window is missing');
+check((compose.match(/^    stop_grace_period: 30s$/gm) || []).length === 3, 'n8n, runner, and Gateway graceful-stop windows changed');
+check(compose.includes('Cannot read persisted controller state'), 'corrupt persisted JSON does not fail closed');
+check(compose.includes('function persistControllerJson(path,value,label)') && compose.includes("state.mode='testing';state.master=false;state.safetyLock=true;") && compose.includes('setImmediate(()=>process.exit(1))'), 'controller write failures do not force safe state and a durable-state reload');
+check((compose.match(/persistControllerJson\(/g) || []).length === 7, 'not every durable controller JSON writer uses fail-closed persistence');
+check(compose.includes('function validatePersistedState(path, value)'), 'persisted controller state-schema validation is missing');
+check(compose.includes('function validatePersistedAuth(path, value)'), 'persisted controller authentication-schema validation is missing');
+check(compose.includes('function validatePersistedCollections()'), 'persisted controller collection-schema validation is missing');
+check(compose.includes('validatePersistedCollections();'), 'persisted controller collection validation is not called');
+check(compose.includes("const t=timeoutSignal(360000);"), 'controller-to-n8n handoff timeout no longer covers the bounded resolution path');
+check(compose.includes('Close the asynchronous validation window immediately before lock acquisition/submission.'), 'final pre-submit controller recheck is missing');
+check(compose.includes('existingTrade=trades.find(t=>t.alertId===alertId);'), 'post-async duplicate-event recheck is missing');
+check(compose.includes('if(tokenMatches.length!==1)') && compose.includes('if(finalTokenMatches.length!==1)'), 'controller source rechecks do not reject duplicate mint configurations');
+check(compose.includes('sourceMints.length>0&&sourceMints.every(isMint)&&new Set(sourceMints).size===sourceMints.length'), 'readiness does not require a non-empty list of valid unique source mints');
+check(compose.includes('if (!isMint(t?.mint)) continue;') && compose.includes('if(t.enabled!==true||!isMint(t.mint)) continue;'), 'malformed source mints can enter durable controls or ntfy subscriptions');
+check(compose.includes("typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null") && compose.includes('matches.length === 1') && compose.includes('candidates.length === 1'), 'malformed or ambiguous Gateway balances are not normalized fail-closed');
+check(compose.includes('function pruneExpiredTriggerGuards()') && !compose.includes('function pruneTriggerGuards(app)'), 'transient source omissions can prune durable trigger guards');
+check(compose.includes('const resetMinutes=Number(row.resetMinutes ?? 0);'), 'trigger-guard expiry is not using the reset window captured at submission');
+check(compose.includes('const sourceResetMinutes=Number(finalToken.alert_reset_minutes??0);'), 'new trigger guards can capture a stale pre-validation source reset window');
+check(compose.includes("function guardRequiresExplicitReset(row)") && compose.includes('!guardRequiresExplicitReset(row)&&resetMinutes>0'), 'a timed guard can expire while its transaction still requires an explicit reset');
+check(compose.includes('recoveredUnresolvedGuards') && compose.includes('if(!triggerGuards[guardKey])'), 'restart recovery does not rebuild a guard across the trade/guard write boundary');
+check(compose.includes("const uncertainOnStartup=trades.filter(t=>t.status==='UNCERTAIN')"), 'persisted uncertain trades do not re-engage the safety lock');
+check(compose.includes("trade.status='REVIEWED'") && compose.includes("'UNCERTAIN','REVIEWED'"), 'manual uncertainty review is not durably distinguished from an unresolved trade');
+check((compose.match(/rec\.status='UNCERTAIN'[\s\S]{0,350}?saveState\(\);\s+saveTrades\(\);/g) || []).length === 2, 'uncertain trade state can persist before its safety lock');
+check(compose.includes('function isSolanaSignature(v)') && compose.includes("rec.signature=isSolanaSignature(result?.signature)?String(result.signature):null;") && compose.includes("if (result?.status === 1 && rec.signature)") && compose.includes("if (poll?.txStatus === 1)"), 'Gateway can be recorded CONFIRMED without a Base58-shaped Solana signature and numeric success status');
+check(compose.includes("const quoteId=typeof q.quoteId==='string'?q.quoteId.trim():'';") && compose.includes("typeof amountIn!=='number'") && compose.includes("typeof raw === 'number'") && compose.includes("if(!Number.isFinite(effective)||effective<=0)"), 'controller accepts malformed final quote identifiers or numeric values');
+check(compose.includes("const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';") && compose.includes('mint !== WRAPPED_SOL_MINT') && compose.includes('function requiredSolBalance(mint,direction,amountIn,minReserve)') && compose.includes('const finalRequiredSol=requiredSolBalance(mint,direction,amountIn,state.minSolReserve);'), 'native SOL balance mapping or SELL reserve protection is missing');
+check(compose.includes('Number(state.minSolReserve)>=0.001') && compose.includes('name="minSolReserve" step="0.001" min="0.001"') && compose.includes('!Number.isFinite(reserve)||reserve<0.001'), 'Trading can accept an impractically small SOL reserve');
+check(compose.includes("pendingRecovery.set(added.address, {expires:") && !compose.includes('pendingRecovery.set(added.address, {secret:'), 'one-time wallet recovery material is retained unnecessarily after rendering');
+check(compose.includes("console.log('[ntfy] topic subscription count:',next.length)") && !compose.includes("console.log('[ntfy] topics:'"), 'routine logs expose full ntfy topic names');
+check(!compose.includes('loginPassword.length>256') && !compose.includes('name="password" maxlength="256" autofocus'), 'login compatibility with an existing long admin password was restricted');
+check(compose.includes('p.length < 12 || p.length > 256'), 'new admin passwords are not bounded to 12–256 characters');
+check(compose.includes('state.lastReadiness = null; // Runtime checks are never carried across a container restart/update.'), 'restart can display a stale readiness result');
+check(compose.includes("const MAINNET_GENESIS_HASH='5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';"), 'Solana mainnet-beta identity constant is missing');
+check(compose.includes("call('getGenesisHash')"), 'RPC preflight does not verify Solana cluster identity');
+check(compose.includes("call('getLatestBlockhash'"), 'RPC preflight does not verify a fresh blockhash');
+check(compose.includes("!Number.isSafeInteger(slot)||slot<0"), 'RPC preflight accepts a malformed confirmed slot/blockhash response');
+check(compose.includes('const RPC_RESTART_ACK_FILE ='), 'controller RPC restart acknowledgement path is missing');
+check(compose.includes('rpcRestartAck()===requestId && providerMatches && endpointMatches'), 'controller does not require the matching RPC restart acknowledgement and endpoint');
+check(compose.includes('requestGatewayRestart(rpcUrl)'), 'RPC configurator restart/fingerprint handshake is missing');
+check(compose.includes('rpcUrlHash:rpcUrlFingerprint(rpcUrl)'), 'RPC configurator does not fingerprint the preflighted endpoint');
+check(compose.includes('pending_ack="$$(cat /gateway-control/restart.request'), 'Gateway supervisor does not acknowledge the exact restart request');
+check(compose.includes('let rpcChangeLock = false;') && compose.includes('let applyInProgress=false;'), 'concurrent RPC-change serialization is missing');
+check(compose.includes("if(rpcChangeLock)throw new Error('RPC configuration changed during final controller validation')"), 'final transaction boundary does not reject an RPC change');
+check(compose.includes("if(rpcChangeLock || activeTradeLock || state.mode!=='trading')"), 'MASTER activation does not recheck concurrent controller state');
+check(compose.includes("if(rpcChangeLock || activeTradeLock || state.mode!=='testing' || state.master)"), 'Trading-mode activation does not recheck concurrent controller state');
+check(compose.includes('waitForGatewayRpc(provider,applied?.requestId,applied?.rpcUrlHash,120000)'), 'Gateway RPC restart acknowledgement window is too short for slow hosts');
+check(compose.includes("if(!state.safetyLock) return send(res,409,'No safety lock is active."), 'manual safety-lock clearing can release a normal in-flight trade');
+check(compose.includes('Persisted RPC-control token is invalid'), 'RPC-control authentication token validation is missing');
+check(compose.includes("!/^[-_A-Za-z0-9]{8,200}$$/.test(apiKey)"), 'Helius API-key canonical-character validation is missing');
+check(compose.includes("Choose Solana Public for the official public endpoint"), 'custom-RPC handling can apply the public endpoint and then time out on provider classification');
+check((compose.match(/hostname\.toLowerCase\(\)\.replace\(\/\\\.\+\$\$\/,''\)/g) || []).length === 2, 'RPC provider classification does not normalize trailing-dot hostname aliases');
+check((compose.match(/if\(u\.pathname&&u\.pathname!=='\/'\)u\.pathname='\/\*\*\*';/g) || []).length === 2, 'controller/configurator RPC path-secret redaction changed');
+check(compose.includes("if(buffer.length>1024*1024)throw new Error('ntfy stream line exceeded 1 MiB')"), 'ntfy incomplete-line bound is missing');
+check(compose.includes("typeof msg.id!=='string'||!msg.id||msg.id.length>128"), 'ntfy event-ID validation is missing');
 
 const publishedPorts = [...compose.matchAll(/^\s+-\s+["']?(\d+):(\d+)["']?\s*$/gm)]
   .map((match) => `${match[1]}:${match[2]}`);
@@ -367,7 +470,11 @@ for (const marker of [
   'Global trade lock held by',
   'START_SERVER=true node dist/index.js --dev',
   'jupiter-ntfy-event',
-  "state.version = '10.2.2'",
+  "const APP_VERSION = '10.2.3'",
+  'state.version = APP_VERSION',
+  '<span class="version">v$${APP_VERSION}</span>',
+  'version:APP_VERSION, state:safePublicState()',
+  'version:`$${APP_VERSION}-portable-storage`',
 ]) {
   check(compose.includes(marker), `runtime safety marker missing: ${marker}`);
 }
@@ -454,14 +561,184 @@ if (b64Match) {
 }
 
 const booleanParserStart = compose.indexOf('function parseEnvBoolean(name, value)');
+const persistedHelpersStart = compose.indexOf('function isMint(v)');
+const persistedHelpersEnd = compose.indexOf('function approx(a, b', persistedHelpersStart);
+const rpcFingerprintStart = compose.indexOf('function rpcUrlFingerprint(raw)');
+const rpcFingerprintEnd = compose.indexOf('function rpcRestartAck()', rpcFingerprintStart);
+const balanceHelperStart = compose.indexOf('async function getBalancesNormalized(wallet, mint, name)');
+const balanceHelperEnd = compose.indexOf('function requiredApiPathsPresent(docs)', balanceHelperStart);
+const rpcPreflightStart = compose.indexOf('async function testSolanaRpc(url)');
+const rpcPreflightEnd = compose.indexOf('function currentStatus()', rpcPreflightStart);
+const hostHelperStart = compose.indexOf('function isContainerLoopbackHost(rawHost)');
 const resolverStart = compose.indexOf('function resolveAppApiUrl(fullUrl, portRaw)');
+const ntfyResolverStart = compose.indexOf('function resolveNtfyServer(raw)');
 const resolverEnd = compose.indexOf('function atomicJson', resolverStart);
-check(booleanParserStart >= 0 && resolverStart > booleanParserStart, 'strict environment boolean parser source was not found');
-check(resolverStart >= 0 && resolverEnd > resolverStart, 'APP API resolver source was not found');
+check(booleanParserStart >= 0 && hostHelperStart > booleanParserStart, 'strict environment boolean parser source was not found');
+check(persistedHelpersStart >= 0 && persistedHelpersEnd > persistedHelpersStart, 'persisted-state validator source was not found');
+check(rpcFingerprintStart >= 0 && rpcFingerprintEnd > rpcFingerprintStart, 'controller RPC endpoint fingerprint source was not found');
+check(balanceHelperStart >= 0 && balanceHelperEnd > balanceHelperStart, 'controller balance normalizer source was not found');
+check(rpcPreflightStart >= 0 && rpcPreflightEnd > rpcPreflightStart, 'RPC mainnet preflight source was not found');
+check(hostHelperStart >= 0 && resolverStart > hostHelperStart && ntfyResolverStart > resolverStart && resolverEnd > ntfyResolverStart, 'source/ntfy URL resolver source was not found');
 
-if (booleanParserStart >= 0 && resolverStart > booleanParserStart) {
+if (rpcFingerprintStart >= 0 && rpcFingerprintEnd > rpcFingerprintStart) {
   try {
-    const parserSource = compose.slice(booleanParserStart, resolverStart).replaceAll('$$', '$');
+    const source=compose.slice(rpcFingerprintStart,rpcFingerprintEnd).replaceAll('$$','$');
+    const fingerprint=new Function('crypto',`${source}\nreturn rpcUrlFingerprint;`)({createHash});
+    const a=fingerprint('https://rpc.example.com/path?b=2&a=1');
+    const b=fingerprint('https://rpc.example.com/path?a=1&b=2');
+    const c=fingerprint('https://rpc.example.com/path?a=1&b=3');
+    check(/^[a-f0-9]{64}$/.test(a) && a===b && a!==c, 'RPC endpoint fingerprint is not canonical and secret-sensitive');
+    check(fingerprint('not a URL')==='', 'RPC endpoint fingerprint accepted an invalid URL');
+  } catch (error) {
+    failures.push(`RPC endpoint fingerprint could not be evaluated: ${error.message}`);
+  }
+}
+
+if (persistedHelpersStart >= 0 && persistedHelpersEnd > persistedHelpersStart) {
+  try {
+    const helperSource = compose.slice(persistedHelpersStart, persistedHelpersEnd).replaceAll('$$', '$');
+    const validators = new Function(`
+      const SEEN_FILE='seen.json', TRADES_FILE='trades.json', AUDIT_FILE='audit.json', TRIGGER_GUARDS_FILE='trigger-guards.json';
+      let seenList, trades, audit, triggerGuards;
+      ${helperSource}
+      return {
+        state: validatePersistedState,
+        auth: validatePersistedAuth,
+        collections(value) {
+          seenList=value.seenList; trades=value.trades; audit=value.audit; triggerGuards=value.triggerGuards;
+          validatePersistedCollections();
+        }
+      };
+    `)();
+    const mint='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    const wallet='11111111111111111111111111111111';
+    const validState={
+      mode:'trading', master:true, safetyLock:false, safetyReason:null,
+      requirePrivateTradingTopic:false, burstPolicy:'collapse', selectedWallet:wallet,
+      tradingNtfyTopic:'trade-12345678901234567890123456789012', lastReadiness:null,
+      minSolReserve:0.02, slippagePct:1, maxPriceImpactPct:2, maxTradeUSDC:25, burstWindowSec:15,
+      tokens:{[mint]:{autoBuy:true,autoSell:false,wallet}},
+      walletBackups:{[wallet]:true}, walletMeta:{[wallet]:{nickname:'Bot',createdAt:null}},
+    };
+    validators.state('state.json', validState);
+    validators.auth('auth.json', {
+      salt:'a'.repeat(64), hash:'b'.repeat(128), sessionSecret:'c'.repeat(64), sessionVersion:1, mustChange:false,
+    });
+    const validCollections={
+      seenList:['event-1'],
+      trades:[{at:'2026-08-15T00:00:00.000Z',alertId:'event-1',mint,direction:'BUY',status:'CONFIRMED',wallet,target:1,usdAmount:5}],
+      audit:[{at:'2026-08-15T00:00:00.000Z',kind:'TRADE_CONFIRMED'}],
+      triggerGuards:{[`${mint}|BUY|${Number(1).toPrecision(16)}`]:{at:'2026-08-15T00:00:00.000Z',alertId:'event-1',mint,direction:'BUY',target:1,resetMinutes:0}},
+    };
+    validators.collections(validCollections);
+    validators.collections({...validCollections,trades:[{...validCollections.trades[0],status:'REVIEWED'}]});
+
+    const rejected = (fn) => { try { fn(); return false; } catch { return true; } };
+    for (const [label, mutate] of [
+      ['non-boolean safety lock', value => { value.safetyLock='false'; }],
+      ['string risk cap', value => { value.maxTradeUSDC='25'; }],
+      ['array controls map', value => { value.tokens=[]; }],
+      ['non-boolean AUTO control', value => { value.tokens[mint].autoBuy='true'; }],
+      ['non-boolean backup evidence', value => { value.walletBackups[wallet]=1; }],
+      ['invalid private topic', value => { value.tradingNtfyTopic='trade-short'; }],
+    ]) {
+      const value=JSON.parse(JSON.stringify(validState));
+      mutate(value);
+      check(rejected(() => validators.state('state.json', value)), `persisted-state validator accepted ${label}`);
+    }
+    check(rejected(() => validators.auth('auth.json', {
+      salt:'a'.repeat(64), hash:'not-a-hash', sessionSecret:'c'.repeat(64), sessionVersion:1, mustChange:false,
+    })), 'persisted-auth validator accepted an invalid password hash');
+    for (const [label, value] of [
+      ['non-string event ID', {...validCollections,seenList:[{}]}],
+      ['oversized event ID', {...validCollections,seenList:['x'.repeat(129)]}],
+      ['unknown trade status', {...validCollections,trades:[{...validCollections.trades[0],status:'UNKNOWN'}]}],
+      ['audit record without kind', {...validCollections,audit:[{at:'2026-08-15T00:00:00.000Z'}]}],
+      ['guard with invalid reset window', {...validCollections,triggerGuards:{guard:{at:'2026-08-15T00:00:00.000Z',alertId:'event-1',mint,direction:'BUY',target:1,resetMinutes:null}}}],
+      ['guard under a mismatched key', {...validCollections,triggerGuards:{guard:{at:'2026-08-15T00:00:00.000Z',alertId:'event-1',mint,direction:'BUY',target:1,resetMinutes:0}}}],
+    ]) {
+      check(rejected(() => validators.collections(value)), `persisted-collection validator accepted ${label}`);
+    }
+  } catch (error) {
+    failures.push(`persisted-state validators could not be evaluated: ${error.message}`);
+  }
+}
+
+if (balanceHelperStart >= 0 && balanceHelperEnd > balanceHelperStart) {
+  try {
+    const mint='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    let gatewayResponse={balances:{SOL:1.25,USDC:'not-a-number',[mint]:3.5}};
+    const gateway=async()=>gatewayResponse;
+    const isMint=value=>/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(value||''));
+    const source=compose.slice(balanceHelperStart,balanceHelperEnd).replaceAll('$$','$');
+    const normalize=new Function('gateway','isMint','NETWORK','WRAPPED_SOL_MINT',`${source}\nreturn getBalancesNormalized;`)(gateway,isMint,'mainnet-beta','So11111111111111111111111111111111111111112');
+
+    let result=await normalize('11111111111111111111111111111111',mint,'Token');
+    check(result.sol===1.25 && result.usdc===0 && result.token===3.5, 'balance normalization did not fail closed on a malformed requested balance');
+
+    gatewayResponse={balances:{SOL:{},USDC:' ',[mint]:-1,OTHER:'Infinity'}};
+    result=await normalize('11111111111111111111111111111111',mint,'Token');
+    check(result.sol===0 && result.usdc===0 && result.token===0, 'balance normalization accepted an object, blank, negative, or non-finite value');
+
+    gatewayResponse={balances:['2','4','7']};
+    result=await normalize('11111111111111111111111111111111',mint,'Token');
+    check(result.sol===0 && result.usdc===0 && result.token===0, 'balance normalization accepted a non-object balance collection');
+
+    gatewayResponse={balances:{SOL:2,USDC:4,OTHER:7}};
+    result=await normalize('11111111111111111111111111111111',mint,'Token');
+    check(result.token===7, 'single-token balance fallback did not accept the one requested non-core balance');
+
+    gatewayResponse={balances:{SOL:2,sol:999,USDC:4,OTHER:7,SECOND:8}};
+    result=await normalize('11111111111111111111111111111111',mint,'Token');
+    check(result.sol===0 && result.token===0, 'ambiguous balance keys did not fail closed');
+
+    gatewayResponse={balances:{SOL:2.5,USDC:4}};
+    result=await normalize('11111111111111111111111111111111','So11111111111111111111111111111111111111112','Solana');
+    check(result.sol===2.5 && result.token===2.5, 'wrapped-SOL balance did not map to native SOL');
+  } catch (error) {
+    failures.push(`controller balance normalizer could not be evaluated: ${error.message}`);
+  }
+}
+
+if (rpcPreflightStart >= 0 && rpcPreflightEnd > rpcPreflightStart) {
+  try {
+    const mainnetHash='5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
+    const validBlockhash='11111111111111111111111111111111';
+    let genesisHash=mainnetHash;
+    let blockhash=validBlockhash;
+    let slot=300_000_000;
+    const fetch=async(_url,options)=>{
+      const request=JSON.parse(options.body);
+      const result=request.method==='getGenesisHash'
+        ? genesisHash
+        : {context:{slot},value:{blockhash}};
+      return {ok:true,status:200,json:async()=>({jsonrpc:'2.0',id:request.id,result})};
+    };
+    const source=compose.slice(rpcPreflightStart,rpcPreflightEnd).replaceAll('$$','$');
+    const preflight=new Function('fetch','MAINNET_GENESIS_HASH',`${source}\nreturn testSolanaRpc;`)(fetch,mainnetHash);
+    const rejected=async()=>{try{await preflight('https://rpc.example.com');return false;}catch{return true;}};
+
+    const valid=await preflight('https://rpc.example.com');
+    check(valid.genesisHash===mainnetHash && valid.slot===slot, 'RPC preflight rejected a valid mainnet identity/blockhash response');
+
+    genesisHash='EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
+    check(await rejected(), 'RPC preflight accepted a non-mainnet genesis hash');
+    genesisHash=mainnetHash;
+    blockhash='short';
+    check(await rejected(), 'RPC preflight accepted a malformed blockhash');
+    blockhash=validBlockhash;
+    slot=1.5;
+    check(await rejected(), 'RPC preflight accepted a non-integer slot');
+    slot='300000000';
+    check(await rejected(), 'RPC preflight accepted a string slot');
+  } catch (error) {
+    failures.push(`RPC mainnet preflight could not be evaluated: ${error.message}`);
+  }
+}
+
+if (booleanParserStart >= 0 && hostHelperStart > booleanParserStart) {
+  try {
+    const parserSource = compose.slice(booleanParserStart, hostHelperStart).replaceAll('$$', '$');
     const parseEnvBoolean = new Function(`${parserSource}\nreturn parseEnvBoolean;`)();
     check(parseEnvBoolean('TEST_VALUE', 'true') === true, 'strict environment boolean parser rejected true');
     check(parseEnvBoolean('TEST_VALUE', 'OFF') === false, 'strict environment boolean parser rejected false');
@@ -473,10 +750,11 @@ if (booleanParserStart >= 0 && resolverStart > booleanParserStart) {
   }
 }
 
-if (resolverStart >= 0 && resolverEnd > resolverStart) {
+if (hostHelperStart >= 0 && resolverEnd > ntfyResolverStart) {
   try {
-    const resolverSource = compose.slice(resolverStart, resolverEnd).replaceAll('$$', '$');
+    const resolverSource = compose.slice(hostHelperStart, resolverEnd).replaceAll('$$', '$');
     const resolveAppApiUrl = new Function(`${resolverSource}\nreturn resolveAppApiUrl;`)();
+    const resolveNtfyServer = new Function(`${resolverSource}\nreturn resolveNtfyServer;`)();
     check(resolveAppApiUrl('', '1') === 'http://host.docker.internal:1/api/tokens', 'minimum APP_API_PORT resolution failed');
     check(resolveAppApiUrl('', '8000') === 'http://host.docker.internal:8000/api/tokens', 'default APP API URL resolution failed');
     check(resolveAppApiUrl('', '8001') === 'http://host.docker.internal:8001/api/tokens', 'custom same-host APP_API_PORT resolution failed');
@@ -503,6 +781,7 @@ if (resolverStart >= 0 && resolverEnd > resolverStart) {
       ['http://[::ffff:127.0.0.1]:8000/api/tokens', '8000'],
       ['http://[::ffff:0.0.0.0]:8000/api/tokens', '8000'],
       ['https://api.localhost:8000/api/tokens', '8000'],
+      ['https://api.localhost.:8000/api/tokens', '8000'],
       ['https://alerts.example.com:0/api/tokens', '8000'],
       ['https://alerts.example.com/not-the-api', '8000'],
     ]) {
@@ -510,8 +789,28 @@ if (resolverStart >= 0 && resolverEnd > resolverStart) {
       try { resolveAppApiUrl(url, port); } catch { rejected = true; }
       check(rejected, `unsafe/invalid APP API input was accepted: url=${url || '(empty)'} port=${port}`);
     }
+
+    check(resolveNtfyServer('https://ntfy.sh') === 'https://ntfy.sh', 'default ntfy URL resolution failed');
+    check(resolveNtfyServer('https://notify.example.com/prefix///') === 'https://notify.example.com/prefix', 'ntfy path-prefix normalization failed');
+    check(resolveNtfyServer('http://host.docker.internal:8080/') === 'http://host.docker.internal:8080', 'same-host ntfy URL resolution failed');
+    for (const url of [
+      '',
+      'ftp://notify.example.com',
+      'https://user:pass@notify.example.com',
+      'https://notify.example.com?token=secret',
+      'https://notify.example.com/#fragment',
+      'http://localhost:8080',
+      'http://localhost.:8080',
+      'http://127.0.0.2:8080',
+      'http://[::1]:8080',
+      'https://notify.example.com:0',
+    ]) {
+      let rejected = false;
+      try { resolveNtfyServer(url); } catch { rejected = true; }
+      check(rejected, `unsafe/invalid NTFY_SERVER input was accepted: ${url || '(empty)'}`);
+    }
   } catch (error) {
-    failures.push(`APP API resolver could not be evaluated: ${error.message}`);
+    failures.push(`source/ntfy URL resolvers could not be evaluated: ${error.message}`);
   }
 }
 

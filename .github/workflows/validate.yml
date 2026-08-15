@@ -24,6 +24,8 @@ jobs:
         with:
           node-version: 22
           package-manager-cache: false
+      - name: Run controller regression tests
+        run: npm test
       - name: Verify embedded workflow and safety invariants
         run: node scripts/verify-release.mjs
       - name: Validate Docker Compose

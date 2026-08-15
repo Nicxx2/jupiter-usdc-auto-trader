@@ -49,6 +49,8 @@ Back up all seven volumes **and** the four stable secrets. Gateway recovery/priv
 
 For a complete file-level backup, first return the trader to `TESTING`, turn `MASTER` off, and stop the entire stack. This makes the PostgreSQL files and cross-volume state consistent. Do not make a raw archive of the PostgreSQL volume while PostgreSQL is running.
 
+The Compose gives PostgreSQL 60 seconds and the supervised n8n/Gateway processes 30 seconds to stop cleanly before Docker may force termination. Wait until every service is stopped before reading the volumes; do not begin the archive while Portainer still shows a service as stopping.
+
 Portainer users can stop the stack, then use a host, hypervisor, NAS, or Docker-volume backup tool that captures every volume listed above. Portainer's Volumes view is useful for confirming the physical names, but the existence of a volume is not itself a backup.
 
 The following Linux-host example discovers volumes from their Compose labels instead of assuming a storage directory. Run it only after the stack is stopped:
@@ -92,7 +94,9 @@ GATEWAY_PASSPHRASE
 
 Treat `controller_data`, `gateway_conf`, the secret backup, and all wallet recovery material as sensitive. Encrypt backups at rest and test restoration on an isolated system.
 
-Monitor Docker disk usage, including `gateway_logs` and the container logging driver. A full Docker data filesystem can stop PostgreSQL or prevent safety/audit state from being written. Resolve capacity problems while the trader remains stopped and `MASTER` is off; do not delete state volumes to reclaim space.
+Container stdout/stderr uses Docker's rotating `local` driver and is bounded to three 10 MB files per container. Still monitor Docker disk usage, including the separate persistent `gateway_logs` volume and Docker's total data store. A full Docker data filesystem can stop PostgreSQL or prevent safety/audit state from being written. Resolve capacity problems while the trader remains stopped and `MASTER` is off; do not delete state volumes to reclaim space.
+
+The controller treats unreadable JSON, the wrong top-level JSON type, or invalid safety/authentication/trade/replay/audit field schemas in an existing `controller_data` volume as a startup error. This is deliberate: silently normalizing damaged authentication, limits, locks, wallet evidence, or replay records would be unsafe. A runtime write error (for example, a full or read-only Docker data filesystem) also forces the in-memory controller to `TESTING`, `MASTER OFF`, and a safety lock, then exits so Docker reloads the last durable state; stop the stack and resolve storage rather than allowing a restart loop. The internal RPC configurator likewise rejects a malformed authentication token in `gateway_control`. Restore a known-good stopped-stack backup instead of deleting reported state. The separate lost-password procedure is the only documented case where `auth.json` is moved intentionally while the stack is stopped.
 
 ## Restore to a clean host
 

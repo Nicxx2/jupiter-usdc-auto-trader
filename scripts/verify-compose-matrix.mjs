@@ -36,6 +36,13 @@ function validConfig(label, overrides, expectedPort, expectedUrl, expectedSecure
 
   const controller = model.services?.['trading-controller'];
   if (!controller) fail(`${label} trading-controller service is missing`);
+  for (const serviceName of ['trading-controller', 'rpc-configurator', 'gateway']) {
+    const aliases = model.services?.[serviceName]?.extra_hosts || {};
+    const hasHostGateway = Array.isArray(aliases)
+      ? aliases.some((value) => /^host\.docker\.internal[:=]host-gateway$/.test(String(value)))
+      : aliases['host.docker.internal'] === 'host-gateway';
+    if (!hasHostGateway) fail(`${label} ${serviceName} is missing the Linux host-gateway alias`);
+  }
   if (String(controller.environment?.APP_API_PORT) !== expectedPort) {
     fail(`${label} APP_API_PORT expected ${expectedPort}, got ${controller.environment?.APP_API_PORT}`);
   }
@@ -159,6 +166,21 @@ function validConfig(label, overrides, expectedPort, expectedUrl, expectedSecure
     if (service.restart !== expectedRestart) {
       fail(`${label} ${serviceName} restart expected ${expectedRestart}, got ${service.restart}`);
     }
+    if (service.logging?.driver !== 'local' || String(service.logging?.options?.['max-size']) !== '10m' ||
+        String(service.logging?.options?.['max-file']) !== '3') {
+      fail(`${label} ${serviceName} must use bounded local logging (10m × 3)`);
+    }
+  }
+
+  const expectedStopGrace = {
+    postgres: new Set(['60s', '1m0s']),
+    n8n: new Set(['30s']),
+    'n8n-runner': new Set(['30s']),
+    gateway: new Set(['30s']),
+  };
+  for (const [serviceName, accepted] of Object.entries(expectedStopGrace)) {
+    const actual = String(model.services?.[serviceName]?.stop_grace_period || '');
+    if (!accepted.has(actual)) fail(`${label} ${serviceName} graceful-stop window changed: ${actual || '(missing)'}`);
   }
 
   const gatewayHealth = model.services?.gateway?.healthcheck;
@@ -235,4 +257,4 @@ for (const secret of Object.keys(stableTestSecrets)) {
   if (!output.includes(secret)) fail(`missing-secret error did not identify ${secret}`);
 }
 
-console.log('PASS: Compose configuration, storage, network, dependency, restart, secret, and port invariants verified');
+console.log('PASS: Compose configuration, storage, network, dependency, restart, shutdown, logging, secret, and port invariants verified');

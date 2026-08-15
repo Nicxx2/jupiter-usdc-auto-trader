@@ -13,6 +13,10 @@ docker compose logs --tail=200 gateway
 
 Do not work around startup problems by publishing n8n/Gateway ports, manually importing the workflow, or editing Gateway YAML. Those steps bypass the one-Compose lifecycle and can leave the dashboard's readiness model out of sync.
 
+If deployment fails before services can initialize, confirm all four required variables are non-empty, TCP port 5680 is not already allocated, the target is Linux Docker Standalone with Compose v2 rather than Swarm, and the host has free Docker storage plus outbound DNS/HTTPS access. A port conflict must be resolved on the host; do not publish the internal n8n or Gateway ports as a workaround.
+
+A repeated `[persistence]` controller error/restart means a durable JSON write failed. Stop the stack, resolve a full/read-only Docker data store, and preserve the volumes; do not keep restarting or delete state to make the error disappear.
+
 ## Dashboard password
 
 On a fresh `controller_data` volume, a random first-run password is printed once in `trading-controller` logs. Sign in at port 5680 and change it. If that volume already contains the controller authentication file, restarting does not create a new first-run password.
@@ -22,6 +26,7 @@ Do not delete controller state to reset access on a funded deployment: it also c
 If the changed password is genuinely lost, stop the entire stack and move **only** `auth.json` inside `controller_data`. Do not move/delete `state.json`, `seen.json`, `trades.json`, `audit.json`, or `trigger-guards.json`. An advanced Docker-host recovery example is:
 
 ```sh
+set -eu
 PROJECT_NAME=jupiter-usdc-auto-trader
 # Change PROJECT_NAME if the actual Portainer stack/project name is different.
 CONTROLLER_VOLUME="$(docker volume ls \
@@ -90,6 +95,7 @@ If the controller repeatedly restarts, inspect its log for a rejected port or UR
 ## ntfy listener is disconnected or no alert is acted on
 
 - Confirm `NTFY_SERVER` matches Jupiter USDC Price Alerts. For ntfy on the Docker host, use `host.docker.internal`, not `localhost`.
+- The value must be a complete unauthenticated HTTP(S) base URL. Embedded credentials, query strings, fragments, port 0, loopback addresses, and authentication-required topics are not supported by this listener.
 - Confirm the source token is enabled and publishes a normal `Buy Price Alert` or `Sell Price Alert`.
 - Confirm the notification body includes the exact full mint in the `Token: NAME (MINT)` line.
 - Confirm the current effective ntfy topic shown by the source matches the trader.
@@ -101,16 +107,28 @@ Action Readiness/Rules and source armed/inactive display state are not troublesh
 
 ## RPC change appears not to apply
 
-RPC changes require `TESTING`, `MASTER OFF`, and no active trade. The configurator preflights the endpoint, updates persistent Gateway configuration, signals the supervisor, and the controller waits for the restarted Gateway to report the requested provider.
+RPC changes require `TESTING`, `MASTER OFF`, and no active trade. The configurator preflights the endpoint, updates persistent Gateway configuration, signals the supervisor with a unique request, and the controller waits for both its acknowledgement and the exact live endpoint fingerprint. A second concurrent change is rejected.
+
+Preflight calls both `getGenesisHash` and `getLatestBlockhash`. An "unexpected genesis hash" error means the endpoint is not Solana mainnet-beta (commonly devnet/testnet) or the provider is not returning the standard RPC response; it is rejected before Gateway configuration changes.
 
 Inspect `rpc-configurator` and `gateway` logs. The supervisor must show it is tracking the real Node server. Do not change it back to a pnpm wrapper.
 
 ## `UNCERTAIN` trade or safety lock
 
-Do not restart repeatedly and do not retry the alert. Keep `MASTER` off. Check the recorded signature and exact assigned wallet on chain, then compare token, USDC, and SOL balances. Clear the lock only after a human has resolved whether the transaction landed.
+Do not restart repeatedly and do not retry the alert. Keep `MASTER` off. Check the recorded signature and exact assigned wallet on chain, then compare token, USDC, and SOL balances. Clear the lock only after a human has resolved whether the transaction landed. Clearing records the affected trade as `REVIEWED`; it does not remove its threshold guard.
 
 Reset replay guards only in `TESTING` with `MASTER OFF`, and only after intentionally re-arming/resetting the corresponding source alerts.
 
 ## Restores and changed secrets
 
 An existing installation requires its original `N8N_DB_PASSWORD`, `N8N_ENCRYPTION_KEY`, `N8N_RUNNERS_AUTH_TOKEN`, and `GATEWAY_PASSPHRASE`. Changing them can break database access, runner authentication, n8n encrypted data, or Gateway wallet access. Restore the stable secrets alongside all seven named volumes. Follow [Storage, backup, and restore](storage.md); do not merge a backup into partly initialized volumes.
+
+## Controller reports unreadable or invalid persisted JSON
+
+The controller deliberately refuses to start if an existing `state.json`, `auth.json`, `seen.json`, `trades.json`, `audit.json`, or `trigger-guards.json` cannot be parsed, has the wrong top-level JSON type, or contains invalid persisted field types/values. It does not replace or normalize the file with defaults because that could erase or weaken a safety lock, risk cap, unresolved trade, replay guard, wallet-backup confirmation, or authentication state.
+
+Stop the complete stack and restore a known-good `controller_data` backup together with the matching installation secrets. Preserve the reported volume/file for investigation. Do not repeatedly restart, delete the file, create an empty replacement, or merge a backup over the damaged volume. If the only problem is a genuinely lost dashboard password and `auth.json` is otherwise healthy, use the separate stopped-stack password procedure at the top of this guide.
+
+## RPC configurator reports an invalid RPC-control token
+
+The token in `gateway_control` authenticates the Docker-private controller/configurator channel. A malformed existing token is rejected rather than replaced while services may still be using it. Stop the complete stack and restore the matching `gateway_control` backup. If no backup exists, an experienced operator may preserve the damaged volume for investigation, move only `rpc-config-token` while every stack service is stopped, and then start the whole stack so one new token is generated before the controller starts. Do not alter `gateway_conf`; it contains Gateway configuration and encrypted wallet material.

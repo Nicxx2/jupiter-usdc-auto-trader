@@ -60,6 +60,8 @@ The deployment will stop with a clear interpolation error if any required value 
 
 Portainer also supports **Load variables from .env file**. You can upload a privately prepared `.env` based on `.env.example` instead of adding variables individually. Do not upload `.env` to GitHub or another public location.
 
+After deployment, Portainer may mask a value or omit it from the normal stack summary. That is expected for stored environment data and does not mean it was discarded. Use the stack's **Editor / Environment variables** view and the controller's safe `[source-api] using ...` log line to confirm optional source settings; never print the four secret values merely to verify them.
+
 ## 4. Point to the required Jupiter USDC Price Alerts source
 
 ### Same server, default port 8000
@@ -115,7 +117,7 @@ NTFY_SERVER=https://ntfy.sh
 TZ=Europe/London
 ```
 
-`NTFY_SERVER` must match the server used by Jupiter USDC Price Alerts and be reachable from the trader container. For self-hosted ntfy on this Docker host, use `http://host.docker.internal:PORT`, not `localhost`.
+`NTFY_SERVER` must match the unauthenticated HTTP(S) base URL used by Jupiter USDC Price Alerts and be reachable from the trader container. A reverse-proxy path prefix is allowed; embedded credentials, query strings, fragments, port 0, and loopback addresses are rejected. For self-hosted ntfy on this Docker host, use `http://host.docker.internal:PORT`, not `localhost`. This release does not send ntfy access-token headers, so an authentication-required server/topic needs a separately protected network path that permits this listener.
 
 If port 5680 is accessed **exclusively** through an HTTPS reverse proxy, also add:
 
@@ -130,6 +132,8 @@ Leave it unset/false for direct `http://SERVER-IP:5680` access. With `true`, a b
 Select **Deploy the stack**. Image downloads and first-time initialization can take several minutes.
 
 Portainer creates all seven Docker-managed volumes automatically. You do not create or enter any host directories. After deployment, **Volumes** should show project-prefixed entries for `postgres_data`, `n8n_data`, `bootstrap_data`, `controller_data`, `gateway_control`, `gateway_conf`, and `gateway_logs`. Portainer documents the Docker-managed model in its [Volumes](https://docs.portainer.io/user/docker/volumes) guide.
+
+Every service also uses Docker's rotating `local` log driver (10 MB, three files per container), so stdout/stderr cannot grow without a bound. Continue monitoring the persistent `gateway_logs` volume and the Docker data filesystem itself.
 
 In the stack's container list:
 
@@ -165,6 +169,10 @@ The controller log includes a safe source line such as:
 
 Run **Quick Test Everything** in the dashboard. The Jupiter Alerts API and internal workflow checks must pass. All n8n source-state reads go through the controller's private proxy, ensuring that initial and final validation use the same configured endpoint.
 
+When applying Helius or a custom RPC, the dashboard requires both the known Solana mainnet-beta genesis hash and a fresh confirmed blockhash before changing Gateway. It then waits for that specific restart request and exact endpoint fingerprint, rather than accepting an older provider of the same type. Devnet and testnet endpoints are rejected rather than being treated as production RPCs.
+
+If an advanced installation runs its custom Solana mainnet RPC on this Docker host, enter `http://host.docker.internal:PORT`; the Compose gives both the preflight configurator and Gateway runtime the same host-gateway alias.
+
 Remain in `TESTING` with `MASTER` off while completing setup and wallet backup.
 
 ## Updating the stack
@@ -180,7 +188,7 @@ Before updating:
 - return the trader to `TESTING` with `MASTER` off; and
 - do not manually delete the one-shot service state or n8n workflow.
 
-After updating, wait for bootstrap completion and rerun **Quick Test Everything**. Every controller restart automatically returns to `TESTING` and `MASTER OFF`.
+After updating, wait for bootstrap completion, confirm the small version badge beside the dashboard title matches the release you deployed, and rerun **Quick Test Everything**. Every controller restart automatically returns to `TESTING` and `MASTER OFF`.
 
 Normal stack/container updates reuse the volumes. Never delete the volumes in Portainer, and never use `docker compose down -v` / `down --volumes`; those actions permanently remove durable state. See [Storage, backup, and restore](storage.md).
 

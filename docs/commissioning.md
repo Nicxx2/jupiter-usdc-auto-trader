@@ -8,7 +8,7 @@ Every installation depends on its own wallet, RPC provider, token, route, and ne
 - Configure the Jupiter Alerts source with `APP_API_PORT` for the same server or `APP_API_URL` for a different server, then verify the source check through **Quick Test Everything**.
 - Restrict dashboard port 5680 to a trusted LAN, Tailscale, or protected HTTPS reverse proxy.
 - Change the generated first-run dashboard password.
-- Select Helius or an appropriate custom RPC and verify that the dashboard reports it active. Public Solana RPC cannot satisfy Trading Ready.
+- Select Helius or an appropriate custom RPC and verify that **Test & Apply RPC** confirms the known Solana mainnet-beta genesis hash, a fresh confirmed blockhash, the matching Gateway restart acknowledgement, and the exact active endpoint. Devnet/testnet endpoints are rejected, and Public Solana RPC cannot satisfy Trading Ready.
 - Create or choose a dedicated low-balance bot wallet.
 - Save its private/recovery key somewhere separate and verify recovery independently if your operational process permits.
 - Confirm the backup in the dashboard.
@@ -60,6 +60,6 @@ If the result is `UNCERTAIN`, a request times out, the controller restarts durin
 2. Leave `MASTER` off and keep the safety lock engaged.
 3. Inspect the recorded signature, assigned wallet, and on-chain transaction/balances using trusted tools.
 4. Determine whether the transaction landed before changing any state.
-5. Clear the safety lock only after human review, while in `TESTING` with `MASTER` off.
+5. Clear the safety lock only after human review, while in `TESTING` with `MASTER` off. This marks the uncertain record `REVIEWED` but deliberately leaves its threshold guard in place.
 
 A conclusive `FAILED` result also deserves review before manually resetting a threshold guard; the safest default is to prevent an alert replay from becoming a second submission.

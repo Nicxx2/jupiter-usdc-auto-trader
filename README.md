@@ -5,11 +5,11 @@
 
 ---
 
-# 🤖 Jupiter USDC Auto Trader v10.2.2
+# 🤖 Jupiter USDC Auto Trader v10.2.3
 
 **Self-hosted guarded Solana execution for Jupiter USDC Price Alerts.**
 
-**Current release:** `v10.2.2` · [See what changed](CHANGELOG.md#1022---2026-08-14)
+**Current release:** `v10.2.3` · [See what changed](CHANGELOG.md#1023---2026-08-15)
 
 > [!IMPORTANT]
 > This is the **optional execution companion** to [Jupiter USDC Price Alerts](https://github.com/Nicxx2/jupiter-usdc-price-alerts), which is the required passive monitoring and signal source. The auto trader does not monitor prices or create targets by itself. Install and run Jupiter USDC Price Alerts first; if you want alerts without automatic execution, use that project on its own.
@@ -63,6 +63,8 @@ Jupiter USDC Auto Trader
 - 🌐 **Same-server or remote source API** — select a local port or complete URL without editing the Compose.
 - 🔒 **Docker-private internals** — only dashboard port 5680 is published.
 - 💾 **Portable persistent storage** — Docker creates and manages the seven project-scoped volumes; no host folders need editing.
+- 🧹 **Bounded container logs** — Docker's rotating `local` log driver prevents unbounded stdout/stderr growth.
+- 🧪 **Behavior regression tests** — GitHub checks critical controller logic in addition to the release and Docker Compose safety matrices.
 
 ---
 
@@ -73,7 +75,7 @@ Jupiter USDC Auto Trader
 
 ![Jupiter Auto Trader dashboard safely started in TESTING with MASTER OFF](docs/images/dashboard-overview.jpg)
 
-The dashboard always starts in **`TESTING` with `MASTER OFF`**. Green readiness badges mean the latest checks passed; they do not enable real trading by themselves and are recomputed before entering `TRADING`.
+The small version badge beside the dashboard title shows the release currently running, so you can confirm an update loaded the expected version. The dashboard always starts in **`TESTING` with `MASTER OFF`**. Green readiness badges mean the latest checks passed; they do not enable real trading by themselves and are recomputed before entering `TRADING`.
 
 | Mode | MASTER | What happens |
 | --- | --- | --- |
@@ -107,7 +109,7 @@ Typing `ENABLE TRADING` makes the controller recompute full Trading readiness an
 ![Expanded Quick Test Everything readiness results](docs/images/dashboard-readiness.jpg)
 
 - **Infrastructure checks** verify Jupiter Alerts, n8n, the internal workflow, Gateway, Solana, ntfy, and a read-only Jupiter quote.
-- **Trading checks** additionally verify the RPC choice, password, safety lock, risk caps, source directions, wallet assignments, recovery-backup confirmation, and SOL reserve.
+- **Trading checks** additionally verify the RPC choice and that no RPC restart is in progress, password, safety lock, risk caps, source directions, wallet assignments, recovery-backup confirmation, and SOL reserve.
 - **Testing ready** means the validation path is available. **Trading ready** means the stricter prerequisites passed at the displayed check time; it does not change the mode or MASTER state, and entering Trading recomputes readiness.
 - Run it after deployment or an update, after resolving an error, and immediately before tiny live-trade commissioning.
 
@@ -157,6 +159,8 @@ The wallet marked **VIEWING / DEFAULT** controls this display and Gateway's defa
 
 This table does not replace execution-time checks. Immediately before every real BUY, the controller re-reads USDC and SOL on the coin's assigned wallet; before every real SELL, it re-reads the exact token mint and SOL on that assigned wallet. Insufficient funds abort—the trader never silently reduces the trade size.
 
+For SOL itself, Jupiter's wrapped-SOL mint is mapped to Gateway's native `SOL` wallet balance. A real SOL SELL requires enough native SOL for both the exact trade amount and the configured minimum SOL reserve.
+
 </details>
 
 <details>
@@ -175,7 +179,7 @@ To enable private-topic enforcement:
 
 Treat a private topic like a secret capability. Rotating it requires updating the source application before Trading can become ready again.
 
-After a real threshold is attempted, its replay guard prevents duplicate or replayed notifications from trading that same threshold repeatedly. Do not reset guards merely to retry a failed or uncertain transaction. Reset only after human review and after intentionally resetting or re-arming the corresponding source alert; guard reset also forces `TESTING` with `MASTER OFF`.
+After a real threshold is attempted, its replay guard prevents duplicate or replayed notifications from trading that same threshold repeatedly. A temporary source outage or omitted target does not erase that evidence. For a resolved trade with a positive reset period, the guard expires from the reset window captured at the attempt. A zero-minute guard, or a guard associated with `SUBMITTING`, `PENDING`, `UNCERTAIN`, or `REVIEWED`, remains until an explicit reset. Do not reset guards merely to retry a failed or uncertain transaction. Reset only after human review and after intentionally resetting or re-arming the corresponding source alert; guard reset also forces `TESTING` with `MASTER OFF`.
 
 </details>
 
@@ -188,10 +192,12 @@ After a real threshold is attempted, its replay guard prevents duplicate or repl
 
 1. Stay in `TESTING` with `MASTER OFF` and no trade in progress.
 2. Choose **Helius** (recommended) and paste its API key, or choose **Custom RPC** and enter the complete provider URL.
-3. Click **Test & Apply RPC**. The controller first preflights the endpoint, then restarts Gateway internally and verifies that the requested provider became active.
+3. Click **Test & Apply RPC**. The controller verifies the endpoint's Solana mainnet-beta genesis hash and a fresh confirmed blockhash, then requires a fresh Gateway restart acknowledgement and the exact requested endpoint fingerprint before reporting success.
 4. Confirm the green **Current** panel shows the intended provider, then rerun **Quick Test Everything**.
 
-**Solana Public** is suitable for Testing only and deliberately cannot make Trading readiness green. If Helius is already configured, leave its key field blank to keep the existing key. Provider keys and custom URLs are never shown back unredacted; do not paste them into issues, logs, or screenshots.
+**Solana Public** is suitable for Testing only and deliberately cannot make Trading readiness green. A devnet, testnet, malformed, unreachable, or non-standard RPC is rejected before configuration is changed. If Helius is already configured, leave its key field blank to keep the existing key. Provider keys and custom URLs are never shown back unredacted; do not paste them into issues, logs, or screenshots.
+
+For a custom Solana mainnet RPC running on the same Docker host, use `http://host.docker.internal:PORT`; both preflight and Gateway runtime receive that Linux host-gateway alias.
 
 </details>
 
@@ -202,7 +208,7 @@ After a real threshold is attempted, its replay guard prevents duplicate or repl
 
 The screenshot values are demonstration examples, not universal recommendations. Review each setting for the dedicated wallet and intended token:
 
-- **Minimum SOL reserve:** the balance that must remain available for fees and account operations.
+- **Minimum SOL reserve:** the balance that must remain available for fees and account operations; values below `0.001 SOL` cannot qualify for Trading readiness, and the safer default is `0.02 SOL`.
 - **Gateway slippage %:** tolerance for movement after a quote; this is separate from price impact.
 - **Maximum price impact %:** a hard rejection limit applied to every Gateway quote.
 - **Maximum trade scenario (USDC):** an independent ceiling on the source app's configured `usd_amount`. An intended scenario above this value is blocked; keep the ceiling only as high as necessary.
@@ -354,7 +360,7 @@ The controller owns one canonical source endpoint. All n8n initial and final sou
 
 If the dashboard is served exclusively through an HTTPS reverse proxy, set `DASHBOARD_COOKIE_SECURE=true`. Do not enable it for direct `http://SERVER-IP:5680` access because browsers will then withhold the login cookie.
 
-If Jupiter USDC Price Alerts uses a self-hosted ntfy server, set this stack's `NTFY_SERVER` to the same server using a URL reachable **from the trader container**. For ntfy on this Docker host, use `http://host.docker.internal:PORT`; do not use `localhost`, which would mean the trader container itself.
+If Jupiter USDC Price Alerts uses a self-hosted ntfy server, set this stack's `NTFY_SERVER` to the same unauthenticated HTTP(S) base URL using an address reachable **from the trader container**. It may include a reverse-proxy path prefix, but not embedded credentials, a query string, or a fragment. For ntfy on this Docker host, use `http://host.docker.internal:PORT`; do not use `localhost`, which would mean the trader container itself. This release does not add ntfy access-token headers, so an authentication-required ntfy topic/server is not compatible unless access is allowed through a separately protected network path.
 
 ---
 
@@ -412,12 +418,13 @@ The execution path checks:
 - wallet exists in Gateway and recovery backup is confirmed;
 - live exact-wallet USDC/token balance and minimum SOL reserve;
 - exact final executable quote;
+- a final controller-owned source, mode, `MASTER`, safety, assignment, cap, recovery, balance, duplicate, and trigger-guard recheck immediately before the global lock;
 - global real-trade lock;
 - duplicate/idempotency handling;
 - persistent same-threshold trigger guard; and
 - burst suppression.
 
-If transaction submission becomes ambiguous, the trade becomes `UNCERTAIN`, `MASTER` is forced off, and a safety lock is engaged. No automatic retry is attempted. A restart while a transaction is `SUBMITTING` or `PENDING` produces the same fail-closed result.
+If transaction submission becomes ambiguous, the trade becomes `UNCERTAIN`, `MASTER` is forced off, and a safety lock is engaged. No automatic retry is attempted. A restart while a transaction is `SUBMITTING` or `PENDING` produces the same fail-closed result, and any persisted `UNCERTAIN` record re-engages its lock. Explicitly clearing the lock after investigation marks those records `REVIEWED`; their threshold guards still require a separate intentional reset.
 
 </details>
 
@@ -479,12 +486,14 @@ Insufficient funds always abort. The system never silently reduces the requested
 | `APP_API_PORT` | No | Same-server Jupiter Alerts port; defaults to `8000`. |
 | `APP_API_URL` | No | Complete source endpoint; overrides `APP_API_PORT` when non-empty. |
 | `DASHBOARD_COOKIE_SECURE` | No | Set `true` only when dashboard access is exclusively HTTPS; defaults to `false`. |
-| `NTFY_SERVER` | No | Container-reachable ntfy base URL; must match the source app and defaults to `https://ntfy.sh`. |
+| `NTFY_SERVER` | No | Container-reachable unauthenticated HTTP(S) ntfy base URL; must match the source app and defaults to `https://ntfy.sh`. |
 | `TZ` | No | Container timezone; defaults to `Europe/London`. |
 
 Never commit `.env`, RPC provider keys, recovery/private keys, Gateway encrypted wallet material, n8n encryption keys, database passwords, or runner tokens.
 
 Back up all seven named volumes while the stack is stopped (or use an application-consistent backup method) and protect the four stable secrets separately. Persistence is not a substitute for a backup.
+
+Existing malformed or unreadable controller JSON is never silently replaced: startup stops fail-closed so a known-good `controller_data` backup can be restored without erasing safety or replay evidence.
 
 </details>
 
@@ -502,6 +511,8 @@ Back up all seven named volumes while the stack is stopped (or use an applicatio
 | `gateway_logs` | Gateway logs. |
 
 Compose/Portainer prefixes physical volume names with the project/stack name and reuses them during normal updates and container recreation. The file supplies `jupiter-usdc-auto-trader` as the stable CLI default; Portainer's stack name overrides it. A normal `docker compose down` preserves volumes; `down -v`, named-volume pruning, and explicit volume deletion do not.
+
+Every container uses Docker's rotating `local` log driver with a 10 MB × 3-file limit. This bounds container stdout/stderr logs; the separate persistent `gateway_logs` volume and overall Docker data filesystem still need normal capacity monitoring.
 
 ➡️ [Storage, backup, and restore guide](docs/storage.md)
 
@@ -530,7 +541,8 @@ These money-moving infrastructure versions are pinned by readable release tag **
 - 💾 [Storage, backup, and restore](docs/storage.md)
 - 🏗️ [Architecture and automatic bootstrap](docs/architecture.md)
 - 🧪 [Commissioning a tiny live trade](docs/commissioning.md)
-- 🔎 [v10.2.2 implementation audit](docs/implementation-audit.md)
+- 🔎 [v10.2.3 implementation audit](docs/implementation-audit.md)
+- 🧪 [Regression test design and change rules](tests/README.md)
 - 🛠️ [Troubleshooting](docs/troubleshooting.md)
 - 🔐 [Security policy](SECURITY.md)
 - 🤝 [Contributing safely](CONTRIBUTING.md)
@@ -541,6 +553,8 @@ These money-moving infrastructure versions are pinned by readable release tag **
 
 The repository includes automated checks for:
 
+- controller and n8n behavior regressions using the actual Compose-embedded functions;
+- alert authorization, BUY/SELL quote math, final safety decisions, replay guards, balances, and RPC mainnet preflight;
 - Docker Compose parsing;
 - required-secret rejection;
 - default source port 8000;
@@ -555,6 +569,7 @@ The repository includes automated checks for:
 - key runtime safety markers.
 
 ```sh
+npm test
 node scripts/verify-release.mjs
 node scripts/verify-compose-matrix.mjs
 ```

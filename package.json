@@ -1,0 +1,15 @@
+{
+  "name": "jupiter-usdc-auto-trader",
+  "version": "10.2.3",
+  "private": true,
+  "description": "Regression tests and release verification for the one-Compose Jupiter USDC Auto Trader artifact",
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1",
+    "verify:release": "node scripts/verify-release.mjs",
+    "verify:compose": "node scripts/verify-compose-matrix.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

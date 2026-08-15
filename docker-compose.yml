@@ -1,9 +1,17 @@
 name: jupiter-usdc-auto-trader
 
+x-default-logging: &default-logging
+  driver: local
+  options:
+    max-size: 10m
+    max-file: '3'
+
 services:
   postgres:
     image: postgres:16@sha256:11a9d238fbb48bab14599c57e41123254452b1a2d93c6c8595bce96f346bd082
     restart: unless-stopped
+    stop_grace_period: 60s
+    logging: *default-logging
     environment:
       POSTGRES_USER: n8n
       POSTGRES_PASSWORD: ${N8N_DB_PASSWORD:?N8N_DB_PASSWORD is required and must remain stable}
@@ -27,8 +35,8 @@ services:
   n8n:
     image: docker.n8n.io/n8nio/n8n:2.31.6@sha256:3c07c723326dd72e46a6969181c66a75260b7a204b9b77ba1ece6d594489c684
     restart: unless-stopped
-    extra_hosts:
-    - host.docker.internal:host-gateway
+    stop_grace_period: 30s
+    logging: *default-logging
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
@@ -170,6 +178,8 @@ services:
   n8n-runner:
     image: n8nio/runners:2.31.6@sha256:fd1c233abcbcc45a5a376132b2d48457e9eaab3c48d642eb276a314d2e4e67ed
     restart: unless-stopped
+    stop_grace_period: 30s
+    logging: *default-logging
     environment:
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:?N8N_RUNNERS_AUTH_TOKEN is required and must remain stable}
       N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
@@ -183,6 +193,7 @@ services:
   trading-controller:
     image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
     restart: unless-stopped
+    logging: *default-logging
     init: true
     entrypoint:
     - node
@@ -206,7 +217,9 @@ services:
       const RPC_CONFIGURATOR = (process.env.RPC_CONFIGURATOR_URL || 'http://rpc-configurator:8081').replace(/\/+$$/, '');
       const RPC_CONTROL_DIR = process.env.RPC_CONTROL_DIR || '/gateway-control';
       const RPC_TOKEN_FILE = `$${RPC_CONTROL_DIR}/rpc-config-token`;
-      const NTFY = (process.env.NTFY_SERVER || 'https://ntfy.sh').replace(/\/+$$/, '');
+      const RPC_RESTART_ACK_FILE = `$${RPC_CONTROL_DIR}/restart.ack`;
+      const NTFY = resolveNtfyServer(process.env.NTFY_SERVER || 'https://ntfy.sh');
+      const APP_VERSION = '10.2.3';
       const NETWORK = process.env.SOLANA_NETWORK || 'mainnet-beta';
       const TOPIC_REFRESH_MS = Number(process.env.TOPIC_REFRESH_SECONDS || 15) * 1000;
       const LOOKBACK = process.env.NTFY_LOOKBACK || '5m';
@@ -221,6 +234,7 @@ services:
       const MAX_TRADES = 500;
       const MAX_AUDIT = 1000;
       const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+      const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
       fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -232,6 +246,13 @@ services:
         if(['1','true','yes','on'].includes(normalized))return true;
         if(['0','false','no','off',''].includes(normalized))return false;
         throw new Error(`$${name} must be true or false`);
+      }
+
+      function isContainerLoopbackHost(rawHost) {
+        const host=String(rawHost||'').toLowerCase().replace(/\.+$$/,'');
+        const mappedIpv4Loopback=/^\[::ffff:(?:0:)?7f[0-9a-f]{2}:/.test(host);
+        return ['localhost','0.0.0.0','::','[::]','::1','[::1]','[::ffff:0:0]'].includes(host) ||
+          host.endsWith('.localhost') || host.startsWith('127.') || mappedIpv4Loopback;
       }
 
       function resolveAppApiUrl(fullUrl, portRaw) {
@@ -250,9 +271,7 @@ services:
         if(u.username||u.password)throw new Error('APP_API_URL must not contain embedded credentials');
         if(u.hash)throw new Error('APP_API_URL must not contain a URL fragment');
         if(u.search)throw new Error('APP_API_URL must not contain query parameters or API keys');
-        const host=String(u.hostname||'').toLowerCase();
-        const mappedIpv4Loopback=/^\[::ffff:7f[0-9a-f]{2}:/.test(host)||host==='[::ffff:0:0]';
-        if(['localhost','0.0.0.0','::','[::]','::1','[::1]'].includes(host)||host.endsWith('.localhost')||host.startsWith('127.')||mappedIpv4Loopback)
+        if(isContainerLoopbackHost(u.hostname))
           throw new Error('APP_API_URL localhost/loopback would point at this container; use APP_API_PORT for the same Docker host');
         if(u.port==='0')throw new Error('APP_API_URL port must be from 1 to 65535');
         const path=u.pathname.replace(/\/+$$/,'');
@@ -261,13 +280,31 @@ services:
         return u.toString();
       }
 
+      function resolveNtfyServer(raw) {
+        let u;
+        try{u=new URL(String(raw||'').trim());}catch{throw new Error('NTFY_SERVER must be a complete http:// or https:// base URL');}
+        if(!['http:','https:'].includes(u.protocol))throw new Error('NTFY_SERVER must use http:// or https://');
+        if(!u.hostname)throw new Error('NTFY_SERVER hostname is missing');
+        if(u.username||u.password)throw new Error('NTFY_SERVER must not contain embedded credentials');
+        if(u.search||u.hash)throw new Error('NTFY_SERVER must not contain a query string or fragment');
+        if(isContainerLoopbackHost(u.hostname))
+          throw new Error('NTFY_SERVER localhost/loopback would point at this container; use host.docker.internal for ntfy on the same Docker host');
+        if(u.port==='0')throw new Error('NTFY_SERVER port must be from 1 to 65535');
+        u.pathname=u.pathname.replace(/\/+$$/,'');
+        return u.toString().replace(/\/+$$/,'');
+      }
+
       function atomicJson(path, value) {
         const tmp = `$${path}.tmp`;
         fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
         fs.renameSync(tmp, path);
       }
       function readJson(path, fallback) {
-        try { return JSON.parse(fs.readFileSync(path, 'utf8')); } catch { return fallback; }
+        try { return JSON.parse(fs.readFileSync(path, 'utf8')); }
+        catch (e) {
+          if (e?.code === 'ENOENT') return fallback;
+          throw new Error(`Cannot read persisted controller state $${path}: $${e.message}`);
+        }
       }
       function boundedPush(arr, value, max) {
         arr.push(value);
@@ -312,6 +349,102 @@ services:
         return '1'.repeat(zeros) + (s || (zeros ? '' : '1'));
       }
       function isMint(v) { return /^[1-9A-HJ-NP-Za-km-z]{32,44}$$/.test(String(v || '')); }
+      function isSolanaSignature(v) { return /^[1-9A-HJ-NP-Za-km-z]{64,100}$$/.test(String(v || '')); }
+      function isPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
+      function hasOwn(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
+      function persistedSchemaError(path, detail) {
+        throw new Error(`Persisted controller state $${path} $${detail}; restore a known-good controller_data backup`);
+      }
+      function validatePersistedState(path, value) {
+        if (!isPlainObject(value)) persistedSchemaError(path, 'must contain a JSON object');
+
+        if (hasOwn(value, 'mode') && !['testing','trading'].includes(value.mode))
+          persistedSchemaError(path, 'has an invalid mode');
+        if (hasOwn(value, 'master') && typeof value.master !== 'boolean')
+          persistedSchemaError(path, 'has a non-boolean MASTER value');
+        if (hasOwn(value, 'safetyLock') && typeof value.safetyLock !== 'boolean')
+          persistedSchemaError(path, 'has a non-boolean safety lock');
+        if (hasOwn(value, 'safetyReason') && value.safetyReason !== null && typeof value.safetyReason !== 'string')
+          persistedSchemaError(path, 'has an invalid safety-lock reason');
+        if (hasOwn(value, 'requirePrivateTradingTopic') && typeof value.requirePrivateTradingTopic !== 'boolean')
+          persistedSchemaError(path, 'has an invalid private-topic policy');
+        if (hasOwn(value, 'burstPolicy') && !['collapse','every-alert'].includes(value.burstPolicy))
+          persistedSchemaError(path, 'has an invalid burst policy');
+        if (hasOwn(value, 'selectedWallet') && value.selectedWallet !== null && !isMint(value.selectedWallet))
+          persistedSchemaError(path, 'has an invalid selected wallet');
+        if (hasOwn(value, 'tradingNtfyTopic') && value.tradingNtfyTopic !== null &&
+            !/^trade-[-_A-Za-z0-9]{32,60}$$/.test(String(value.tradingNtfyTopic)))
+          persistedSchemaError(path, 'has an invalid private Trading Topic');
+        if (hasOwn(value, 'lastReadiness') && value.lastReadiness !== null && !isPlainObject(value.lastReadiness))
+          persistedSchemaError(path, 'has an invalid readiness snapshot');
+
+        const numericRules = [
+          ['minSolReserve', 0, Number.POSITIVE_INFINITY, false],
+          ['slippagePct', 0, 10, false],
+          ['maxPriceImpactPct', 0.1, 25, false],
+          ['maxTradeUSDC', 1, 1000000, false],
+          ['burstWindowSec', 5, 300, true],
+        ];
+        for (const [key, min, max, integer] of numericRules) {
+          if (!hasOwn(value, key)) continue;
+          const n=value[key];
+          if (typeof n !== 'number' || !Number.isFinite(n) || n < min || n > max || (integer && !Number.isInteger(n)))
+            persistedSchemaError(path, `has an invalid $${key}`);
+        }
+
+        for (const mapName of ['tokens','walletBackups','walletMeta']) {
+          if (hasOwn(value, mapName) && !isPlainObject(value[mapName]))
+            persistedSchemaError(path, `has an invalid $${mapName} map`);
+        }
+        for (const [mint, control] of Object.entries(value.tokens || {})) {
+          if (!isMint(mint) || !isPlainObject(control) ||
+              (hasOwn(control, 'autoBuy') && typeof control.autoBuy !== 'boolean') ||
+              (hasOwn(control, 'autoSell') && typeof control.autoSell !== 'boolean') ||
+              (hasOwn(control, 'wallet') && control.wallet !== null && !isMint(control.wallet)))
+            persistedSchemaError(path, `has invalid automation controls for $${mint}`);
+        }
+        for (const [address, confirmed] of Object.entries(value.walletBackups || {})) {
+          if (!isMint(address) || typeof confirmed !== 'boolean')
+            persistedSchemaError(path, `has invalid wallet-backup evidence for $${address}`);
+        }
+        for (const [address, meta] of Object.entries(value.walletMeta || {})) {
+          if (!isMint(address) || !isPlainObject(meta) ||
+              (hasOwn(meta, 'nickname') && typeof meta.nickname !== 'string') ||
+              (hasOwn(meta, 'createdAt') && meta.createdAt !== null && typeof meta.createdAt !== 'string'))
+            persistedSchemaError(path, `has invalid wallet metadata for $${address}`);
+        }
+      }
+      function validatePersistedAuth(path, value) {
+        if (!isPlainObject(value) || !/^[a-f0-9]{64}$$/.test(String(value.salt || '')) ||
+            !/^[a-f0-9]{128}$$/.test(String(value.hash || '')) ||
+            !/^[a-f0-9]{64}$$/.test(String(value.sessionSecret || '')) ||
+            !Number.isInteger(value.sessionVersion) || value.sessionVersion < 1 ||
+            typeof value.mustChange !== 'boolean') {
+          throw new Error(`Persisted controller authentication $${path} has an invalid schema; use the documented stopped-stack password recovery or restore controller_data`);
+        }
+      }
+      function validatePersistedCollections() {
+        if (!Array.isArray(seenList) || seenList.some(id => typeof id !== 'string' || !id || id.length > 128))
+          persistedSchemaError(SEEN_FILE, 'must contain only non-empty alert ID strings');
+        const tradeStatuses=new Set(['SUBMITTING','PENDING','CONFIRMED','FAILED','UNCERTAIN','REVIEWED']);
+        if (!Array.isArray(trades) || trades.some(row => !isPlainObject(row) ||
+            typeof row.at !== 'string' || !Number.isFinite(Date.parse(row.at)) ||
+            typeof row.alertId !== 'string' || !row.alertId || row.alertId.length > 128 || !isMint(row.mint) ||
+            !['BUY','SELL'].includes(row.direction) || !tradeStatuses.has(row.status) || !isMint(row.wallet) ||
+            typeof row.target !== 'number' || !Number.isFinite(row.target) || row.target <= 0 ||
+            typeof row.usdAmount !== 'number' || !Number.isFinite(row.usdAmount) || row.usdAmount <= 0))
+          persistedSchemaError(TRADES_FILE, 'contains an invalid durable trade record');
+        if (!Array.isArray(audit) || audit.some(row => !isPlainObject(row) ||
+            typeof row.at !== 'string' || !Number.isFinite(Date.parse(row.at)) || typeof row.kind !== 'string' || !row.kind))
+          persistedSchemaError(AUDIT_FILE, 'contains an invalid audit record');
+        if (!isPlainObject(triggerGuards) || Object.entries(triggerGuards).some(([key,row]) => !isPlainObject(row) ||
+            typeof row.at !== 'string' || !Number.isFinite(Date.parse(row.at)) || typeof row.alertId !== 'string' || !row.alertId || row.alertId.length > 128 ||
+            !isMint(row.mint) || !['BUY','SELL'].includes(row.direction) ||
+            typeof row.target !== 'number' || !Number.isFinite(row.target) || row.target <= 0 ||
+            typeof row.resetMinutes !== 'number' || !Number.isFinite(row.resetMinutes) || row.resetMinutes < 0 ||
+            key !== `$${row.mint}|$${row.direction}|$${Number(row.target).toPrecision(16)}`))
+          persistedSchemaError(TRIGGER_GUARDS_FILE, 'contains an invalid trigger-guard record');
+      }
       function approx(a, b, rel = 1e-9, abs = 1e-12) {
         a = Number(a); b = Number(b);
         return Number.isFinite(a) && Number.isFinite(b) &&
@@ -319,12 +452,17 @@ services:
       }
 
       function priceImpactPercent(raw) {
-        const n=Number(raw);
-        return Number.isFinite(n) && n >= 0 ? Math.abs(n)*100 : null;
+        return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw*100 : null;
       }
       function impactWithinLimit(raw, maxPct=state.maxPriceImpactPct) {
         const pct=priceImpactPercent(raw);
         return pct !== null && Number.isFinite(Number(maxPct)) && pct <= Number(maxPct);
+      }
+      function requiredSolBalance(mint,direction,amountIn,minReserve) {
+        if(typeof minReserve!=='number'||!Number.isFinite(minReserve)||minReserve<0)return Number.POSITIVE_INFINITY;
+        if(direction==='SELL'&&mint===WRAPPED_SOL_MINT)
+          return typeof amountIn==='number'&&Number.isFinite(amountIn)&&amountIn>0?minReserve+amountIn:Number.POSITIVE_INFINITY;
+        return minReserve;
       }
       function isDefaultPublicSolanaRpc(url) {
         const s=String(url||'').trim().toLowerCase().replace(/\/+$$/,'');
@@ -336,6 +474,7 @@ services:
           const u=new URL(String(raw||''));
           if(u.username)u.username='***';
           if(u.password)u.password='***';
+          if(u.pathname&&u.pathname!=='/')u.pathname='/***';
           if([...u.searchParams.keys()].length){
             for(const k of [...u.searchParams.keys()])u.searchParams.set(k,'***');
           }
@@ -345,7 +484,7 @@ services:
       function classifyRpcUrl(raw){
         try{
           const u=new URL(String(raw||''));
-          const host=u.hostname.toLowerCase();
+          const host=u.hostname.toLowerCase().replace(/\.+$$/,'');
           if(host==='api.mainnet-beta.solana.com')return 'public';
           if(host.endsWith('helius-rpc.com'))return 'helius';
           return raw?'custom':'unknown';
@@ -370,9 +509,22 @@ services:
           method:'POST',
           headers:{'content-type':'application/json'},
           body:JSON.stringify({provider,heliusApiKey,customRpcUrl})
-        },20000);
+        },30000);
       }
-      async function waitForGatewayRpc(provider,timeoutMs=50000){
+      function rpcUrlFingerprint(raw) {
+        try{
+          const u=new URL(String(raw||''));
+          u.hash='';
+          u.searchParams.sort();
+          return crypto.createHash('sha256').update(u.toString()).digest('hex');
+        }catch{return '';}
+      }
+      function rpcRestartAck() {
+        try{return fs.readFileSync(RPC_RESTART_ACK_FILE,'utf8').trim();}catch{return '';}
+      }
+      async function waitForGatewayRpc(provider,requestId,expectedRpcUrlHash,timeoutMs=120000){
+        if(!/^[a-f0-9]{32}$$/.test(String(requestId||'')) || !/^[a-f0-9]{64}$$/.test(String(expectedRpcUrlHash||'')))
+          throw new Error('RPC configurator returned an invalid restart confirmation');
         await sleep(1500);
         const start=Date.now();
         let last=null;
@@ -381,11 +533,13 @@ services:
             const status=await gateway(`/chains/solana/status?network=$${encodeURIComponent(NETWORK)}`,{},5000);
             last=status;
             const actual=classifyRpcUrl(status?.rpcUrl);
-            if(actual===provider || (provider==='custom'&&actual==='custom'))return status;
+            const providerMatches=actual===provider || (provider==='custom'&&['custom','helius'].includes(actual));
+            const endpointMatches=rpcUrlFingerprint(status?.rpcUrl)===expectedRpcUrlHash;
+            if(rpcRestartAck()===requestId && providerMatches && endpointMatches)return status;
           }catch{}
           await sleep(1000);
         }
-        throw new Error(`Gateway restarted but the requested $${provider} RPC did not become active$${last?.rpcUrl?` (current: $${redactRpcUrl(last.rpcUrl)})`:''}`);
+        throw new Error(`Gateway did not acknowledge and activate the exact requested $${provider} RPC$${last?.rpcUrl?` (current: $${redactRpcUrl(last.rpcUrl)})`:''}`);
       }
       function currentEffectiveTopic(app,mint) {
         const token=(Array.isArray(app?.tokens)?app.tokens:[]).find(t=>t?.mint===mint);
@@ -423,8 +577,10 @@ services:
         }, timeout);
       }
 
+      const stateFileExists = fs.existsSync(STATE_FILE);
       let state = readJson(STATE_FILE, null);
-      if (!state || typeof state !== 'object') {
+      if (stateFileExists) validatePersistedState(STATE_FILE, state);
+      if (!state) {
         state = {
           version: 6,
           mode: 'testing',
@@ -447,11 +603,12 @@ services:
           updatedAt: nowIso(),
         };
       }
-      state.version = '10.2.2';
+      state.version = APP_VERSION;
       const startupPreviousMode = state.mode === 'trading' ? 'trading' : 'testing';
       const startupPreviousMaster = state.master === true;
       state.mode = 'testing'; // Restart safety: never resume unattended live trading after maintenance/restart.
       state.master = false;
+      state.lastReadiness = null; // Runtime checks are never carried across a container restart/update.
       state.tokens = state.tokens && typeof state.tokens === 'object' ? state.tokens : {};
       state.walletBackups = state.walletBackups && typeof state.walletBackups === 'object' ? state.walletBackups : {};
       state.walletMeta = state.walletMeta && typeof state.walletMeta === 'object' ? state.walletMeta : {};
@@ -468,9 +625,21 @@ services:
       state.burstPolicy = state.burstPolicy === 'every-alert' ? 'every-alert' : 'collapse';
       state.burstWindowSec = Math.max(5, Math.min(300, Number(state.burstWindowSec || 15)));
       state.safetyLock = state.safetyLock === true;
-      function saveState() { state.updatedAt = nowIso(); atomicJson(STATE_FILE, state); }
+      let persistenceExitScheduled=false;
+      function persistControllerJson(path,value,label) {
+        try{atomicJson(path,value);}
+        catch(e){
+          state.mode='testing';state.master=false;state.safetyLock=true;
+          state.safetyReason=`Controller could not persist $${label}; stop trading and resolve Docker storage before clearing this lock.`;
+          console.error(`[persistence] $${label}: $${e.message||e}`);
+          if(!persistenceExitScheduled){persistenceExitScheduled=true;setImmediate(()=>process.exit(1));}
+          throw e;
+        }
+      }
+      function saveState() { state.updatedAt = nowIso(); persistControllerJson(STATE_FILE, state, 'controller state'); }
       saveState();
 
+      const authFileExists = fs.existsSync(AUTH_FILE);
       let auth = readJson(AUTH_FILE, null);
       function hashPassword(password, salt) {
         return crypto.scryptSync(password, Buffer.from(salt, 'hex'), 64).toString('hex');
@@ -485,9 +654,10 @@ services:
           mustChange,
           updatedAt: nowIso(),
         };
-        atomicJson(AUTH_FILE, auth);
+        persistControllerJson(AUTH_FILE, auth, 'authentication state');
       }
-      if (!auth || !auth.hash || !auth.salt || !auth.sessionSecret) {
+      if (authFileExists) validatePersistedAuth(AUTH_FILE, auth);
+      if (!auth) {
         const initial = crypto.randomBytes(15).toString('base64url');
         setPassword(initial, true);
         console.log('');
@@ -617,37 +787,35 @@ services:
       }
 
       let seenList = readJson(SEEN_FILE, []);
-      if (!Array.isArray(seenList)) seenList = [];
+      let trades = readJson(TRADES_FILE, []);
+      let audit = readJson(AUDIT_FILE, []);
+      let triggerGuards = readJson(TRIGGER_GUARDS_FILE, {});
+      validatePersistedCollections();
       seenList = seenList.slice(-MAX_SEEN);
       let seen = new Set(seenList);
-      let trades = readJson(TRADES_FILE, []);
-      if (!Array.isArray(trades)) trades = [];
       trades = trades.slice(-MAX_TRADES);
-      let audit = readJson(AUDIT_FILE, []);
-      if (!Array.isArray(audit)) audit = [];
       audit = audit.slice(-MAX_AUDIT);
-      let triggerGuards = readJson(TRIGGER_GUARDS_FILE, {});
-      if (!triggerGuards || typeof triggerGuards !== 'object' || Array.isArray(triggerGuards)) triggerGuards = {};
       function addAudit(kind, data = {}) {
         boundedPush(audit, { at: nowIso(), kind, ...data }, MAX_AUDIT);
-        atomicJson(AUDIT_FILE, audit);
+        persistControllerJson(AUDIT_FILE, audit, 'audit history');
       }
-      function saveTrades() { trades = trades.slice(-MAX_TRADES); atomicJson(TRADES_FILE, trades); }
-      function saveTriggerGuards() { atomicJson(TRIGGER_GUARDS_FILE, triggerGuards); }
+      function saveTrades() { trades = trades.slice(-MAX_TRADES); persistControllerJson(TRADES_FILE, trades, 'trade history'); }
+      function saveTriggerGuards() { persistControllerJson(TRIGGER_GUARDS_FILE, triggerGuards, 'trigger guards'); }
       function triggerGuardKey(mint,direction,target) {
         return `$${mint}|$${direction}|$${Number(target).toPrecision(16)}`;
       }
-      function pruneTriggerGuards(app) {
-        const tokens = Array.isArray(app?.tokens) ? app.tokens : [];
-        const valid = new Set();
-        for (const t of tokens) {
-          if (!t?.mint) continue;
-          for (const v of (Array.isArray(t.buy_alerts)?t.buy_alerts:[])) valid.add(triggerGuardKey(t.mint,'BUY',Number(v)));
-          for (const v of (Array.isArray(t.sell_alerts)?t.sell_alerts:[])) valid.add(triggerGuardKey(t.mint,'SELL',Number(v)));
-        }
+      function guardRequiresExplicitReset(row) {
+        return trades.some(t=>t.alertId===row?.alertId&&['SUBMITTING','PENDING','UNCERTAIN','REVIEWED'].includes(t.status));
+      }
+      function pruneExpiredTriggerGuards() {
+        const now=Date.now();
         let changed=false;
-        for (const key of Object.keys(triggerGuards)) {
-          if (!valid.has(key)) { delete triggerGuards[key]; changed=true; }
+        for (const [key,row] of Object.entries(triggerGuards)) {
+          const resetMinutes=Number(row?.resetMinutes||0);
+          const elapsed=now-new Date(row?.at||0).getTime();
+          if(!guardRequiresExplicitReset(row)&&resetMinutes>0&&Number.isFinite(elapsed)&&elapsed>=resetMinutes*60*1000){
+            delete triggerGuards[key];changed=true;
+          }
         }
         if (changed) saveTriggerGuards();
       }
@@ -655,8 +823,8 @@ services:
         const key=triggerGuardKey(token.mint,direction,target);
         const row=triggerGuards[key];
         if (!row) return {blocked:false,key,row:null};
-        const resetMinutes=Number(token.alert_reset_minutes ?? 0);
-        if (resetMinutes > 0) {
+        const resetMinutes=Number(row.resetMinutes ?? 0);
+        if (!guardRequiresExplicitReset(row) && resetMinutes > 0) {
           const elapsed=Date.now()-new Date(row.at||0).getTime();
           if (Number.isFinite(elapsed) && elapsed >= resetMinutes*60*1000) {
             delete triggerGuards[key]; saveTriggerGuards();
@@ -668,28 +836,40 @@ services:
 
       // Crash/restart recovery: an unresolved submission is never silently retried.
       const unresolvedOnStartup = trades.filter(t => ['SUBMITTING','PENDING'].includes(t.status));
+      let recoveredUnresolvedGuards=0;
       if (unresolvedOnStartup.length) {
         for (const t of unresolvedOnStartup) {
+          const guardKey=triggerGuardKey(t.mint,t.direction,t.target);
+          if(!triggerGuards[guardKey]){
+            triggerGuards[guardKey]={at:t.at,alertId:t.alertId,mint:t.mint,direction:t.direction,target:t.target,resetMinutes:0};
+            recoveredUnresolvedGuards+=1;
+          }
           t.status='UNCERTAIN';
           t.updatedAt=nowIso();
           t.reason='Controller restarted while this transaction was unresolved';
         }
-        state.safetyLock=true;
-        state.safetyReason=`$${unresolvedOnStartup.length} transaction(s) were unresolved when the controller restarted. Review before clearing.`;
-        state.mode='testing'; state.master=false;
-        saveTrades(); saveState();
+        if(recoveredUnresolvedGuards)saveTriggerGuards();
+        saveTrades();
       }
+      const uncertainOnStartup=trades.filter(t=>t.status==='UNCERTAIN');
+      if(uncertainOnStartup.length){
+        state.safetyLock=true;
+        state.safetyReason=`$${uncertainOnStartup.length} uncertain transaction(s) require human review before clearing.`;
+        state.mode='testing';state.master=false;saveState();
+      }
+      pruneExpiredTriggerGuards();
       if (startupPreviousMode === 'trading' || startupPreviousMaster) {
         addAudit('RESTART_FORCED_SAFE',{previousMode:startupPreviousMode,previousMaster:startupPreviousMaster});
       }
       if (unresolvedOnStartup.length) {
-        addAudit('RESTART_UNRESOLVED_TRADES',{count:unresolvedOnStartup.length});
+        addAudit('RESTART_UNRESOLVED_TRADES',{count:unresolvedOnStartup.length,recoveredGuards:recoveredUnresolvedGuards});
       }
 
       let pendingRecovery = new Map();
       let pendingHandoffs = new Map();
       let claimedHandoffs = new Map();
       let activeTradeLock = null;
+      let rpcChangeLock = false;
       let desiredTopics = [];
       let activeTopics = [];
       let streamController = null;
@@ -709,7 +889,8 @@ services:
         let changed = false;
         const tokens = Array.isArray(app?.tokens) ? app.tokens : [];
         for (const t of tokens) {
-          if (!t?.mint) continue;
+          // Never persist controls for malformed source identifiers; execution requires an exact Solana mint.
+          if (!isMint(t?.mint)) continue;
           if (!state.tokens[t.mint] || typeof state.tokens[t.mint] !== 'object') {
             state.tokens[t.mint] = { autoBuy: false, autoSell: false, wallet: null };
             changed = true;
@@ -726,7 +907,7 @@ services:
             changed=true;
           }
         }
-        pruneTriggerGuards(app);
+        pruneExpiredTriggerGuards();
         if (changed) saveState();
       }
       async function getWallets() {
@@ -735,35 +916,38 @@ services:
       }
       function solanaWalletAddresses(wallets) {
         const row = wallets.find(w => String(w.chain).toLowerCase() === 'solana');
-        return Array.isArray(row?.walletAddresses) ? row.walletAddresses : [];
+        return Array.isArray(row?.walletAddresses) ? row.walletAddresses.map(String).filter(isMint) : [];
       }
       async function getBalancesNormalized(wallet, mint, name) {
         if (!wallet) return { configured: false, wallet: null, sol: null, usdc: null, token: null, raw: {} };
         const tokens = ['SOL', 'USDC'];
-        if (mint && isMint(mint)) tokens.push(mint);
+        if (mint && isMint(mint) && mint !== WRAPPED_SOL_MINT) tokens.push(mint);
         const r = await gateway('/chains/solana/balances', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ network: NETWORK, address: wallet, tokens }),
         }, 15000);
-        const b = r?.balances && typeof r.balances === 'object' ? r.balances : {};
-        const findCI = key => {
-          const k = Object.keys(b).find(x => x.toLowerCase() === String(key).toLowerCase());
-          return k ? Number(b[k]) : null;
+        const b = r?.balances && typeof r.balances === 'object' && !Array.isArray(r.balances) ? r.balances : {};
+        const balanceNumber = value => {
+          return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
         };
-        let token = mint ? findCI(mint) : null;
-        if (token === null && name) token = findCI(name);
+        const findUniqueCI = key => {
+          const matches = Object.keys(b).filter(x => x.toLowerCase() === String(key).toLowerCase());
+          return matches.length === 1 ? balanceNumber(b[matches[0]]) : null;
+        };
+        const sol=findUniqueCI('SOL') ?? 0;
+        let token = mint && Object.prototype.hasOwnProperty.call(b,mint) ? balanceNumber(b[mint]) : null;
+        if (mint === WRAPPED_SOL_MINT) token=sol;
+        if (token === null && name) token = findUniqueCI(name);
         if (token === null && mint) {
-          const candidates = Object.entries(b)
-            .filter(([k]) => !['SOL','USDC'].includes(k.toUpperCase()))
-            .map(([,v]) => Number(v));
-          if (candidates.length === 1) token = candidates[0];
+          const candidates = Object.entries(b).filter(([k]) => !['SOL','USDC'].includes(k.toUpperCase()));
+          if (candidates.length === 1) token = balanceNumber(candidates[0][1]);
         }
         return {
           configured: true,
           wallet,
-          sol: findCI('SOL') ?? 0,
-          usdc: findCI('USDC') ?? 0,
+          sol,
+          usdc: findUniqueCI('USDC') ?? 0,
           token: token ?? 0,
           raw: b,
         };
@@ -798,7 +982,10 @@ services:
 
         try {
           app = await getApp(); syncTokenControls(app);
-          add('app', 'Jupiter Alerts API', Array.isArray(app.tokens), `$${app.tokens?.length || 0} token(s)`);
+          const sourceMints=Array.isArray(app.tokens)?app.tokens.map(t=>String(t?.mint||'')):[];
+          const sourceIdentityOk=Array.isArray(app.tokens)&&sourceMints.length>0&&sourceMints.every(isMint)&&new Set(sourceMints).size===sourceMints.length;
+          add('app', 'Jupiter Alerts API', sourceIdentityOk,
+            sourceIdentityOk?`$${sourceMints.length} token(s) with unique full mints`:'token list contains a malformed or duplicate mint');
         } catch (e) { add('app', 'Jupiter Alerts API', false, e.message); }
 
         try {
@@ -844,7 +1031,7 @@ services:
 
         try {
           solanaStatus = await gateway(`/chains/solana/status?network=$${encodeURIComponent(NETWORK)}`, {}, 10000);
-          add('solana', 'Solana mainnet', !!solanaStatus && solanaStatus.chain === 'solana',
+          add('solana', 'Solana mainnet', !!solanaStatus && solanaStatus.chain === 'solana' && solanaStatus.network === NETWORK,
             `$${solanaStatus?.network || ''} block $${solanaStatus?.currentBlockNumber || solanaStatus?.currentBlock || '—'}`);
         } catch (e) { add('solana', 'Solana mainnet', false, e.message); }
 
@@ -877,6 +1064,7 @@ services:
 
         add('password', 'Admin password changed', auth.mustChange !== true, auth.mustChange ? 'change the first-run password' : 'yes');
         add('safety', 'Safety lock clear', state.safetyLock !== true, state.safetyLock ? state.safetyReason || 'locked' : 'clear');
+        add('rpcChange','RPC configuration idle',!rpcChangeLock,rpcChangeLock?'provider change/restart still in progress':'idle');
 
         try {
           wallets=await getWallets();
@@ -919,7 +1107,8 @@ services:
                 (enabledAutos.length ? `$${enabledAutos.length} auto-enabled coin(s) use the required private Trading Topic` : 'private Trading Topic required; no auto-enabled coins yet'))
             : 'Shared/custom ntfy topics allowed — exact full mint + current effective topic + target are still validated');
 
-        const riskCapsOk=Number.isFinite(Number(state.maxPriceImpactPct)) && Number(state.maxPriceImpactPct)>0 &&
+        const riskCapsOk=Number.isFinite(Number(state.minSolReserve)) && Number(state.minSolReserve)>=0.001 &&
+          Number.isFinite(Number(state.maxPriceImpactPct)) && Number(state.maxPriceImpactPct)>0 &&
           Number(state.maxPriceImpactPct)<=25 && Number.isFinite(Number(state.maxTradeUSDC)) && Number(state.maxTradeUSDC)>0;
         add('riskCaps','Execution risk caps',riskCapsOk,
           `max impact $${state.maxPriceImpactPct}% · max trade $${state.maxTradeUSDC} USDC · slippage $${state.slippagePct}%`);
@@ -952,7 +1141,7 @@ services:
         add('fundsPolicy','Trade-specific balance checks',true,'Exact assigned-wallet USDC/token balance is re-read immediately before every trade');
 
         const coreIds=['app','n8n','workflow','gateway','gatewayTokens','solana','api','ntfy','quote'];
-        const tradingIds=[...coreIds,'password','safety','rpcManager','productionRpc','triggerSecurity','riskCaps','sourceDirections','walletInventory','assignments','assignedSol','fundsPolicy'];
+        const tradingIds=[...coreIds,'password','safety','rpcChange','rpcManager','productionRpc','triggerSecurity','riskCaps','sourceDirections','walletInventory','assignments','assignedSol','fundsPolicy'];
         const coreOk=coreIds.every(id=>checks.find(c=>c.id===id)?.ok);
         const tradingOk=tradingIds.every(id=>checks.find(c=>c.id===id)?.ok);
         const result={at:nowIso(),coreOk,tradingOk,checks};
@@ -1072,7 +1261,7 @@ services:
         const tradingTopicReady=!state.requirePrivateTradingTopic ||
           autoEnabledTokens.every(t=>String((sm.get(t.mint)||{}).ntfy_effective_topic||t.ntfy_topic||'')===state.tradingNtfyTopic);
         const triggerGuardHtml = activeGuards.length
-          ? `<div class="banner warn"><b>$${activeGuards.length} live-trading trigger guard(s) armed.</b><br><small>These prevent the same price threshold being traded repeatedly. A guard is automatically removed when its target is removed from Jupiter Alerts; timed alerts expire with their configured reset period.</small></div>`
+          ? `<div class="banner warn"><b>$${activeGuards.length} live-trading trigger guard(s) armed.</b><br><small>These prevent the same price threshold being traded repeatedly. Timed guards expire from the reset period captured when the trade was attempted, unless that transaction is unresolved; other guards remain until an explicit reviewed reset.</small></div>`
           : '<p class="muted">No live-trading trigger guards are currently armed.</p>';
 
         const activeRpcKind=classifyRpcUrl(solanaLive?.rpcUrl);
@@ -1087,7 +1276,6 @@ services:
           `<tr><td>$${html(t.at || t.updatedAt)}</td><td>$${html(t.name)}</td><td>$${html(t.direction)}</td><td>$${html(t.status)}</td><td>$${Number.isFinite(Number(t.priceImpactPercent))?html(Number(t.priceImpactPercent).toFixed(2)+'%'):'—'}</td><td class="mint">$${html(t.signature || '—')}</td></tr>`
         ).join('') || '<tr><td colspan="6"><div class="empty">No live trades yet.</div></td></tr>';
 
-        const n8nHost = String(req.headers.host || 'falcon.local').split(':')[0];
         const warning = auth.mustChange ? `<div class="banner bad">Change the first-run admin password before Trading Mode can be enabled.</div>` : '';
         const lock = state.safetyLock ? `<div class="banner bad"><b>SAFETY LOCK:</b> $${html(state.safetyReason || 'An uncertain transaction requires review.')}</div>` : '';
 
@@ -1095,7 +1283,7 @@ services:
       <title>Jupiter Auto Trader</title>
       <style>
       body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#0f1217;color:#edf2f7;margin:0}
-      .wrap{max-width:1200px;margin:26px auto;padding:0 16px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}
+      .wrap{max-width:1200px;margin:26px auto;padding:0 16px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}.version{display:inline-block;margin-left:8px;padding:3px 7px;border:1px solid #3a4656;border-radius:999px;color:#aeb9c7;font-size:12px;font-weight:600;vertical-align:middle}
       .card{background:#171b22;border:1px solid #2a313c;border-radius:14px;padding:18px;margin:14px 0}
       .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;align-items:start;grid-auto-rows:max-content}
       .banner{padding:12px 14px;border-radius:10px;margin:10px 0}.good{background:#10291a;border:1px solid #285e38}.bad{background:#351718;border:1px solid #7d3034}.warn{background:#332814;border:1px solid #725b28}
@@ -1117,7 +1305,7 @@ services:
       .empty{padding:20px;text-align:center;color:#91a0b2}
       @media(max-width:700px){table{display:block;overflow-x:auto}.check{display:block}.check small{display:block;text-align:left;margin-left:25px}.summarymeta{display:none}}
       </style></head><body><div class="wrap">
-      <div class="top"><div><h1>🤖 Jupiter Auto Trader</h1><div class="muted">Jupiter USDC Price Alerts → ntfy → n8n → Hummingbot Gateway</div></div>
+      <div class="top"><div><h1>🤖 Jupiter Auto Trader <span class="version">v$${APP_VERSION}</span></h1><div class="muted">Jupiter USDC Price Alerts → ntfy → n8n → Hummingbot Gateway</div></div>
       <div><span class="muted">Workflow engine: internal</span> &nbsp; <a href="/machine.json" target="_blank">Diagnostics ↗</a></div></div>
       $${notice ? `<div class="banner good">$${html(notice)}</div>` : ''}$${warning}$${lock}
 
@@ -1223,7 +1411,7 @@ services:
       <div class="panelbody">
       <h3 style="margin-top:0">Viewed wallet balances</h3>
       $${state.selectedWallet ? `<table><thead><tr><th>Asset</th><th>Balance</th></tr></thead><tbody>$${balanceRows}</tbody></table>` : '<p>No wallet selected.</p>'}
-      <p class="muted">Balances are read live through Gateway. Auto BUY checks USDC; Auto SELL checks the exact token mint; every real trade also checks the SOL reserve immediately before execution.</p>
+      <p class="muted">Balances are read live through Gateway. Auto BUY checks USDC; Auto SELL checks the exact token mint; every real trade also checks the SOL reserve immediately before execution. Wrapped SOL uses the native SOL balance, and a SOL SELL preserves the configured reserve in addition to its sale amount.</p>
       </div>
       </details>
 
@@ -1307,7 +1495,7 @@ services:
       <summary><span>⚙️ Safety settings</span><span class="summarymeta">Impact ≤$${html(state.maxPriceImpactPct)}% · Trade ≤$${html(state.maxTradeUSDC)} USDC · SOL $${html(state.minSolReserve)}</span></summary>
       <div class="panelbody">
       <form method="post" action="/admin/safety">$${csrf}
-      <label>Minimum SOL reserve<br><input type="number" name="minSolReserve" step="0.001" min="0" value="$${html(state.minSolReserve)}"></label><br><br>
+      <label>Minimum SOL reserve<br><input type="number" name="minSolReserve" step="0.001" min="0.001" value="$${html(state.minSolReserve)}"></label><br><br>
       <label>Gateway slippage %<br><input type="number" name="slippagePct" step="0.1" min="0" max="10" value="$${html(state.slippagePct)}"></label><br>
       <span class="muted">Tolerance for price movement after a quote. This is different from price impact.</span><br><br>
       <label>Maximum price impact %<br><input type="number" name="maxPriceImpactPct" step="0.1" min="0.1" max="25" value="$${html(state.maxPriceImpactPct)}"></label><br>
@@ -1340,7 +1528,7 @@ services:
 
 
       $${auth.mustChange ? `<div class="card"><h2>Change first-run password</h2><form method="post" action="/admin/change-password">$${csrf}
-      <input type="password" name="password" minlength="12" placeholder="new password (12+ chars)"> <input type="password" name="confirm" minlength="12" placeholder="repeat">
+      <input type="password" name="password" minlength="12" maxlength="256" placeholder="new password (12+ chars)"> <input type="password" name="confirm" minlength="12" maxlength="256" placeholder="repeat">
       <button>Change password</button></form></div>` : ''}
 
       <div class="card"><form method="post" action="/logout">$${csrf}<button>Log out</button></form>
@@ -1402,7 +1590,7 @@ services:
 
       const admin = http.createServer(async (req, res) => {
         try {
-          const u = new URL(req.url, `http://$${req.headers.host || 'localhost'}`);
+          const u = new URL(req.url, 'http://admin');
           if (u.pathname === '/healthz') return send(res, 200, JSON.stringify({ok:true}), 'application/json');
           if (u.pathname === '/login' && req.method === 'GET') return send(res, 200, loginPage());
           if (u.pathname === '/login' && req.method === 'POST') {
@@ -1429,7 +1617,7 @@ services:
             try { app = await getApp(); syncTokenControls(app); } catch {}
             try { wallets = await getWallets(); } catch {}
             return send(res, 200, JSON.stringify({
-              version:'10.2.2', state:safePublicState(), auth:{mustChange:auth.mustChange},
+              version:APP_VERSION, state:safePublicState(), auth:{mustChange:auth.mustChange},
               ntfy:{streamConnected,activeTopics,desiredTopics,lastTopicRefreshAt,lastForwardedAt,lastForwardedId,lastDecision,lastError},
               app:{tokenCount:app?.tokens?.length || 0},
               gateway:{wallets},
@@ -1451,7 +1639,7 @@ services:
           }
           if (u.pathname === '/admin/change-password') {
             const p = String(f.password || '');
-            if (p.length < 12 || p !== String(f.confirm || '')) return send(res, 400, 'Password must be 12+ characters and match.', 'text/plain');
+            if (p.length < 12 || p.length > 256 || p !== String(f.confirm || '')) return send(res, 400, 'Password must be 12–256 characters and match.', 'text/plain');
             setPassword(p, false);
             state.mode = 'testing'; state.master = false; saveState();
             return send(res, 303, '', 'text/plain', { location:'/login', 'set-cookie':sessionCookie('',0) });
@@ -1478,6 +1666,8 @@ services:
             return redirect(res,'/');
           }
           if (u.pathname === '/admin/rpc/apply') {
+            if(rpcChangeLock)
+              return send(res,409,'An RPC provider change is already in progress.','text/plain');
             if(state.mode!=='testing'||state.master||activeTradeLock)
               return send(res,409,'RPC changes require TESTING mode, MASTER OFF, and no trade in progress.','text/plain');
             const provider=String(f.rpcProvider||'').trim().toLowerCase();
@@ -1486,21 +1676,28 @@ services:
             const heliusApiKey=String(f.heliusApiKey||'').trim();
             const customRpcUrl=String(f.customRpcUrl||'').trim();
 
-            const applied=await applyRpcProvider(provider,heliusApiKey,customRpcUrl);
-            state.mode='testing';state.master=false;saveState();
-            addAudit('RPC_PROVIDER_APPLIED',{provider,endpoint:applied?.endpoint||null});
-
-            // rpc-configurator writes the restart request only after its direct RPC preflight succeeds.
-            const live=await waitForGatewayRpc(provider,50000);
-            addAudit('RPC_PROVIDER_ACTIVE',{provider,rpcUrl:redactRpcUrl(live?.rpcUrl||'')});
+            rpcChangeLock=true;
             state.lastReadiness=null;saveState();
-            return redirect(res,'/');
+            try{
+              const applied=await applyRpcProvider(provider,heliusApiKey,customRpcUrl);
+              state.mode='testing';state.master=false;saveState();
+              addAudit('RPC_PROVIDER_APPLIED',{provider,endpoint:applied?.endpoint||null});
+
+              // The configurator requests a fresh Gateway process only after direct RPC preflight.
+              // Require both that request's acknowledgement and the exact endpoint fingerprint.
+              const live=await waitForGatewayRpc(provider,applied?.requestId,applied?.rpcUrlHash,120000);
+              addAudit('RPC_PROVIDER_ACTIVE',{provider,rpcUrl:redactRpcUrl(live?.rpcUrl||'')});
+              state.lastReadiness=null;saveState();
+              return redirect(res,'/');
+            }finally{
+              rpcChangeLock=false;
+            }
           }
           if (u.pathname === '/admin/safety') {
             if(activeTradeLock) return send(res,409,'Cannot change safety settings while a trade is in progress.','text/plain');
             const reserve=Number(f.minSolReserve),slip=Number(f.slippagePct),burst=Number(f.burstWindowSec);
             const maxImpact=Number(f.maxPriceImpactPct),maxTrade=Number(f.maxTradeUSDC);
-            if(!Number.isFinite(reserve)||reserve<0||!Number.isFinite(slip)||slip<0||slip>10||
+            if(!Number.isFinite(reserve)||reserve<0.001||!Number.isFinite(slip)||slip<0||slip>10||
                !Number.isFinite(maxImpact)||maxImpact<0.1||maxImpact>25||
                !Number.isFinite(maxTrade)||maxTrade<1||maxTrade>1000000||
                !Number.isFinite(burst)||burst<5||burst>300){
@@ -1521,6 +1718,8 @@ services:
             if (desired && state.mode === 'trading') {
               const r = await readiness();
               if (!r.tradingOk) return send(res, 409, 'Trading readiness is not green. Run Quick Test Everything and fix failures first.', 'text/plain');
+              if(rpcChangeLock || activeTradeLock || state.mode!=='trading')
+                return send(res,409,'Trading state changed while readiness was running. Wait for the active operation, then test again.','text/plain');
             }
             state.master = desired; saveState(); addAudit('MASTER_CHANGED', {value:desired});
             return redirect(res, '/');
@@ -1534,6 +1733,8 @@ services:
               if (String(f.confirm || '').trim() !== 'ENABLE TRADING') return send(res, 400, 'Type ENABLE TRADING exactly.', 'text/plain');
               const r = await readiness();
               if (!r.tradingOk) return send(res, 409, 'Not ready for Trading Mode. Run Quick Test Everything and fix every red trading check.', 'text/plain');
+              if(rpcChangeLock || activeTradeLock || state.mode!=='testing' || state.master)
+                return send(res,409,'Configuration changed while readiness was running. Return to TESTING with MASTER OFF, then test again.','text/plain');
               state.mode = 'trading'; state.master = false; saveState(); addAudit('MODE_CHANGED',{mode:'trading'});
               return redirect(res, '/');
             }
@@ -1560,14 +1761,17 @@ services:
             state.walletBackups[added.address] = false;
             state.walletMeta[added.address] = {nickname,createdAt:nowIso()};
             state.mode = 'testing'; state.master = false; saveState();
-            pendingRecovery.set(added.address, {secret:secret58, expires:Date.now()+15*60*1000});
+            pendingRecovery.set(added.address, {expires:Date.now()+15*60*1000});
             addAudit('WALLET_CREATED',{address:added.address,nickname});
             return send(res, 200, await recoveryPage(session, added.address, secret58));
           }
           if (u.pathname === '/admin/wallet/backup-confirm') {
             const address = String(f.address || '');
             const p = pendingRecovery.get(address);
-            if (!p || p.expires < Date.now()) return send(res, 410, 'Recovery display expired. Do not enable trading until you have a valid recovery backup.', 'text/plain');
+            if (!p || p.expires < Date.now()) {
+              if(p)pendingRecovery.delete(address);
+              return send(res, 410, 'Recovery confirmation window expired. Do not enable trading until you have a valid recovery backup.', 'text/plain');
+            }
             if (String(f.confirm || '').trim() !== 'I SAVED IT') return send(res, 400, 'Type I SAVED IT exactly.', 'text/plain');
             state.walletBackups[address] = true; pendingRecovery.delete(address); saveState();
             addAudit('WALLET_BACKUP_CONFIRMED',{address}); return redirect(res, '/');
@@ -1629,9 +1833,17 @@ services:
             return redirect(res,'/');
           }
           if (u.pathname === '/admin/clear-lock') {
+            if(!state.safetyLock) return send(res,409,'No safety lock is active. An in-flight trade lock cannot be cleared manually.','text/plain');
             if (String(f.confirm || '').trim() !== 'CLEAR SAFETY LOCK') return send(res,400,'Type CLEAR SAFETY LOCK exactly.','text/plain');
+            const reviewedAt=nowIso();let reviewedTrades=0;
+            for(const trade of trades){
+              if(trade.status==='UNCERTAIN'){
+                trade.status='REVIEWED';trade.reviewedAt=reviewedAt;trade.updatedAt=reviewedAt;reviewedTrades+=1;
+              }
+            }
+            if(reviewedTrades)saveTrades();
             state.safetyLock=false; state.safetyReason=null; state.mode='testing'; state.master=false; activeTradeLock=null; saveState();
-            addAudit('SAFETY_LOCK_CLEARED'); return redirect(res,'/');
+            addAudit('SAFETY_LOCK_CLEARED',{reviewedTrades}); return redirect(res,'/');
           }
           return send(res, 404, 'Not found', 'text/plain');
         } catch (e) {
@@ -1642,7 +1854,7 @@ services:
 
       function safePublicState() {
         return {
-          version:'10.2.2-portable-storage', mode:state.mode, master:state.master,
+          version:`$${APP_VERSION}-portable-storage`, mode:state.mode, master:state.master,
           tokens:state.tokens, selectedWallet:state.selectedWallet,
           selectedWalletNickname:state.selectedWallet ? walletLabel(state.selectedWallet) : null,
           walletBackupConfirmed:!!state.selectedWallet && state.walletBackups[state.selectedWallet]===true,
@@ -1662,6 +1874,7 @@ services:
       }
       function cleanOldHandoffs() {
         const now = Date.now();
+        for (const [k,v] of pendingRecovery) if (v.expires < now) pendingRecovery.delete(k);
         for (const [k,v] of pendingHandoffs) if (v.expires < now) pendingHandoffs.delete(k);
         for (const [k,v] of claimedHandoffs) if (v.expires < now) claimedHandoffs.delete(k);
       }
@@ -1674,19 +1887,25 @@ services:
         if (state.mode !== 'trading') throw new Error('System is not in TRADING mode');
         if (!state.master) throw new Error('MASTER AUTO TRADING is OFF');
         if (state.safetyLock) throw new Error(`Safety lock active: $${state.safetyReason || 'locked'}`);
+        if (rpcChangeLock) throw new Error('RPC configuration change is in progress');
 
         const direction = body.direction === 'BUY' ? 'BUY' : body.direction === 'SELL' ? 'SELL' : null;
         const mint = String(body.mint || '');
-        const target = Number(body.target);
-        const usdAmount = Number(body.usdAmount);
-        const tokenAmount = Number(body.tokenAmount || 0);
+        const target = body.target;
+        const usdAmount = body.usdAmount;
+        const tokenAmount = body.tokenAmount == null ? 0 : body.tokenAmount;
         const alertTopic=String(body.topic||'');
         const q = body.quote || {};
-        if (!direction || !isMint(mint) || !(target > 0) || !(usdAmount > 0) || !q.quoteId) throw new Error('Invalid trade request');
+        const quoteId=typeof q.quoteId==='string'?q.quoteId.trim():'';
+        if (!direction || !isMint(mint) || typeof target!=='number' || !Number.isFinite(target) || target<=0 ||
+            typeof usdAmount!=='number' || !Number.isFinite(usdAmount) || usdAmount<=0 || !quoteId)
+          throw new Error('Invalid trade request');
 
         const app = await getApp(); syncTokenControls(app);
-        const token = (app.tokens || []).find(t => t.mint === mint);
-        if (!token || token.enabled !== true) throw new Error('Token is no longer enabled in app');
+        const tokenMatches=(Array.isArray(app?.tokens)?app.tokens:[]).filter(t=>t?.mint===mint);
+        if(tokenMatches.length!==1)throw new Error('Token mint no longer has exactly one source configuration');
+        const token=tokenMatches[0];
+        if (token.enabled !== true) throw new Error('Token is no longer enabled in app');
         const liveTopic=currentEffectiveTopic(app,mint);
         if(!liveTopic || alertTopic!==liveTopic)
           throw new Error('Alert ntfy topic no longer matches this token\'s current effective topic');
@@ -1721,27 +1940,80 @@ services:
         const expectedIn = direction === 'BUY' ? USDC_MINT : mint;
         const expectedOut = direction === 'BUY' ? mint : USDC_MINT;
         if (String(q.tokenIn) !== expectedIn || String(q.tokenOut) !== expectedOut) throw new Error('Final quote token direction mismatch');
-        const amountIn = Number(q.amountIn), amountOut = Number(q.amountOut);
-        if (!(amountIn > 0) || !(amountOut > 0)) throw new Error('Invalid final quote amounts');
+        const amountIn = q.amountIn, amountOut = q.amountOut;
+        if (typeof amountIn!=='number' || !Number.isFinite(amountIn) || amountIn<=0 ||
+            typeof amountOut!=='number' || !Number.isFinite(amountOut) || amountOut<=0)
+          throw new Error('Invalid final quote amounts');
         const finalImpactPercent=priceImpactPercent(q.priceImpactPct);
         if(finalImpactPercent===null || finalImpactPercent>Number(state.maxPriceImpactPct))
           throw new Error(`Final quote price impact $${finalImpactPercent===null?'invalid':finalImpactPercent.toFixed(2)+'%'} exceeds cap $${state.maxPriceImpactPct}%`);
         const effective = direction === 'BUY' ? amountIn / amountOut : amountOut / amountIn;
+        if(!Number.isFinite(effective)||effective<=0)throw new Error('Invalid final quote effective price');
         if (direction === 'BUY' && effective > target) throw new Error('Final BUY quote no longer meets target');
         if (direction === 'SELL' && effective < target) throw new Error('Final SELL quote no longer meets target');
         if (direction === 'BUY' && !approx(amountIn, usdAmount, 1e-6, 1e-8)) throw new Error('Final BUY quote amount differs from configured USDC scenario');
-        if (direction === 'SELL' && (!(tokenAmount > 0) || !approx(amountIn, tokenAmount, 1e-6, 1e-8))) throw new Error('Final SELL quote amount differs from validated token amount');
+        if (direction === 'SELL' && (typeof tokenAmount!=='number' || !Number.isFinite(tokenAmount) ||
+            !(tokenAmount > 0) || !approx(amountIn, tokenAmount, 1e-6, 1e-8)))
+          throw new Error('Final SELL quote amount differs from validated token amount');
 
         const bal=await getBalancesNormalized(tradeWallet,mint,token.name);
-        if (Number(bal.sol) < Number(state.minSolReserve)) throw new Error(`SOL reserve too low ($${bal.sol} < $${state.minSolReserve})`);
+        const requiredSol=requiredSolBalance(mint,direction,amountIn,state.minSolReserve);
+        if (Number(bal.sol)+1e-9 < requiredSol) throw new Error(`SOL balance/reserve too low ($${bal.sol} < $${requiredSol})`);
         if (direction === 'BUY' && Number(bal.usdc) + 1e-9 < amountIn) throw new Error(`Insufficient USDC ($${bal.usdc} < $${amountIn})`);
         if (direction === 'SELL' && Number(bal.token) + 1e-9 < amountIn) throw new Error(`Insufficient $${token.name} ($${bal.token} < $${amountIn})`);
+
+        // Close the asynchronous validation window immediately before lock acquisition/submission.
+        // This also makes a concurrent replay idempotent if its first duplicate check ran before
+        // the original request persisted its trade record.
+        // Read balances first, then fetch source configuration last so a remote disable/topic/target
+        // change made during the balance request is still observed before the synchronous lock step.
+        const finalBal=await getBalancesNormalized(tradeWallet,mint,token.name);
+        let existingTrade=trades.find(t=>t.alertId===alertId);
+        if(existingTrade)return existingTrade;
+        const finalApp=await getApp(); syncTokenControls(finalApp);
+        existingTrade=trades.find(t=>t.alertId===alertId);
+        if(existingTrade)return existingTrade;
+        const finalTokenMatches=(Array.isArray(finalApp?.tokens)?finalApp.tokens:[]).filter(t=>t?.mint===mint);
+        if(finalTokenMatches.length!==1)throw new Error('Token mint changed or became duplicated during final controller validation');
+        const finalToken=finalTokenMatches[0];
+        if(finalToken.enabled!==true)throw new Error('Token changed or was disabled during final controller validation');
+        const finalTopic=currentEffectiveTopic(finalApp,mint);
+        if(!finalTopic||finalTopic!==alertTopic)throw new Error('Alert ntfy topic changed during final controller validation');
+        if(state.mode!=='trading')throw new Error('System left TRADING mode during final controller validation');
+        if(!state.master)throw new Error('MASTER was turned OFF during final controller validation');
+        if(state.safetyLock)throw new Error(`Safety lock became active: $${state.safetyReason||'locked'}`);
+        if(rpcChangeLock)throw new Error('RPC configuration changed during final controller validation');
+        if(state.requirePrivateTradingTopic&&finalTopic!==state.tradingNtfyTopic)
+          throw new Error('Private Trading Topic requirement changed during final controller validation');
+        const finalControl=state.tokens[mint]||{autoBuy:false,autoSell:false,wallet:null};
+        if(finalControl.wallet!==tradeWallet)throw new Error('Trading wallet assignment changed during final controller validation');
+        if(direction==='BUY'&&finalControl.autoBuy!==true)throw new Error(`$${finalToken.name} AUTO BUY was turned OFF during final controller validation`);
+        if(direction==='SELL'&&finalControl.autoSell!==true)throw new Error(`$${finalToken.name} AUTO SELL was turned OFF during final controller validation`);
+        const finalTargets=direction==='BUY'?(finalToken.buy_alerts||[]):(finalToken.sell_alerts||[]);
+        if(!finalTargets.some(v=>approx(v,target)))throw new Error('Fired target changed during final controller validation');
+        if(!approx(finalToken.usd_amount,usdAmount))throw new Error('USDC scenario changed during final controller validation');
+        if(usdAmount>Number(state.maxTradeUSDC))throw new Error(`Trade scenario $${usdAmount} USDC exceeds current safety cap $${state.maxTradeUSDC} USDC`);
+        if(finalImpactPercent>Number(state.maxPriceImpactPct))
+          throw new Error(`Final quote price impact $${finalImpactPercent.toFixed(2)}% exceeds current cap $${state.maxPriceImpactPct}%`);
+        if(state.walletBackups[tradeWallet]!==true)throw new Error('Trading wallet recovery confirmation changed during final controller validation');
+        const finalRequiredSol=requiredSolBalance(mint,direction,amountIn,state.minSolReserve);
+        if(Number(finalBal.sol)+1e-9<finalRequiredSol)throw new Error(`SOL balance/reserve changed during final controller validation ($${finalBal.sol} < $${finalRequiredSol})`);
+        if(direction==='BUY'&&Number(finalBal.usdc)+1e-9<amountIn)throw new Error(`USDC balance changed during final controller validation ($${finalBal.usdc} < $${amountIn})`);
+        if(direction==='SELL'&&Number(finalBal.token)+1e-9<amountIn)throw new Error(`$${finalToken.name} balance changed during final controller validation ($${finalBal.token} < $${amountIn})`);
+        const finalGuard=guardStatus(finalToken,direction,target);
+        if(finalGuard.blocked){
+          return {
+            at:nowIso(),alertId,name:finalToken.name,mint,direction,status:'TRIGGER_GUARD_SUPPRESSED',
+            reason:`This exact $${direction} threshold was already used for a real trade and is still guarded`,
+            guardedAt:finalGuard.row?.at||null,signature:null
+          };
+        }
 
         if (state.burstPolicy === 'collapse') {
           const cutoff = Date.now() - state.burstWindowSec * 1000;
           const recent = trades.find(t => t.mint === mint && t.direction === direction &&
             new Date(t.at || t.updatedAt || 0).getTime() >= cutoff &&
-            ['SUBMITTING','PENDING','CONFIRMED','UNCERTAIN'].includes(t.status));
+            ['SUBMITTING','PENDING','CONFIRMED','UNCERTAIN','REVIEWED'].includes(t.status));
           if (recent) {
             return {
               at:nowIso(), alertId, name:token.name, mint, direction,
@@ -1758,27 +2030,33 @@ services:
           target, usdAmount, tokenAmount:direction==='SELL'?amountIn:null,
           effectivePrice:effective, wallet:tradeWallet, walletNickname:walletLabel(tradeWallet),
           priceImpactPercent:finalImpactPercent,maxPriceImpactPct:state.maxPriceImpactPct,
-          quoteId:q.quoteId, status:'SUBMITTING', signature:null
+          quoteId, status:'SUBMITTING', signature:null
         };
         boundedPush(trades, rec, MAX_TRADES); saveTrades();
-        triggerGuards[triggerGuardKey(mint,direction,target)]={at:nowIso(),alertId,mint,direction,target,resetMinutes:Number(token.alert_reset_minutes??0)};
+        const sourceResetMinutes=Number(finalToken.alert_reset_minutes??0);
+        triggerGuards[triggerGuardKey(mint,direction,target)]={
+          at:nowIso(),alertId,mint,direction,target,
+          resetMinutes:Number.isFinite(sourceResetMinutes)&&sourceResetMinutes>=0?sourceResetMinutes:0
+        };
         saveTriggerGuards();
         addAudit('TRADE_SUBMITTING',{alertId,mint,direction,target});
 
         try {
           const result = await gateway('/connectors/jupiter/router/execute-quote', {
             method:'POST', headers:{'content-type':'application/json'},
-            body:JSON.stringify({walletAddress:tradeWallet,network:NETWORK,quoteId:q.quoteId})
+            body:JSON.stringify({walletAddress:tradeWallet,network:NETWORK,quoteId})
           }, 90000);
 
-          rec.updatedAt=nowIso(); rec.signature=result?.signature || null; rec.gatewayStatus=result?.status;
+          rec.updatedAt=nowIso();
+          rec.signature=isSolanaSignature(result?.signature)?String(result.signature):null;
+          rec.gatewayStatus=result?.status;
           rec.data=result?.data || null;
-          if (Number(result?.status) === 1) {
+          if (result?.status === 1 && rec.signature) {
             rec.status='CONFIRMED'; activeTradeLock=null; saveTrades();
             addAudit('TRADE_CONFIRMED',{alertId,signature:rec.signature});
             return rec;
           }
-          if (Number(result?.status) === -1) {
+          if (result?.status === -1) {
             rec.status='FAILED'; activeTradeLock=null; saveTrades();
             addAudit('TRADE_FAILED',{alertId,signature:rec.signature});
             return rec;
@@ -1792,26 +2070,28 @@ services:
                 method:'POST', headers:{'content-type':'application/json'},
                 body:JSON.stringify({network:NETWORK,signature:rec.signature})
               }, 15000);
-              if (Number(poll?.txStatus) === 1) {
+              if (poll?.txStatus === 1) {
                 rec.status='CONFIRMED'; rec.poll=poll; rec.updatedAt=nowIso(); activeTradeLock=null; saveTrades();
                 addAudit('TRADE_CONFIRMED_AFTER_POLL',{alertId,signature:rec.signature}); return rec;
               }
-              if (Number(poll?.txStatus) === -1) {
+              if (poll?.txStatus === -1) {
                 rec.status='FAILED'; rec.poll=poll; rec.updatedAt=nowIso(); activeTradeLock=null; saveTrades();
                 addAudit('TRADE_FAILED_AFTER_POLL',{alertId,signature:rec.signature}); return rec;
               }
             }
           }
 
-          rec.status='UNCERTAIN'; rec.updatedAt=nowIso(); saveTrades();
+          rec.status='UNCERTAIN'; rec.updatedAt=nowIso();
           state.safetyLock=true; state.safetyReason=`Transaction result uncertain for alert $${alertId}$${rec.signature ? ` / $${rec.signature}` : ''}`;
           state.master=false; saveState();
+          saveTrades();
           addAudit('TRADE_UNCERTAIN',{alertId,signature:rec.signature});
           return rec;
         } catch (e) {
-          rec.status='UNCERTAIN'; rec.error=e.message || String(e); rec.updatedAt=nowIso(); saveTrades();
+          rec.status='UNCERTAIN'; rec.error=e.message || String(e); rec.updatedAt=nowIso();
           state.safetyLock=true; state.safetyReason=`Execution request became uncertain for alert $${alertId}. Do not retry automatically.`;
           state.master=false; saveState();
+          saveTrades();
           addAudit('TRADE_EXECUTION_ERROR_UNCERTAIN',{alertId,error:rec.error});
           return rec;
         }
@@ -1860,7 +2140,7 @@ services:
           const removed=seenList.splice(0,seenList.length-MAX_SEEN);
           for(const x of removed) seen.delete(x);
         }
-        atomicJson(SEEN_FILE,seenList); return true;
+        persistControllerJson(SEEN_FILE,seenList,'replay-event history'); return true;
       }
       async function listGatewayTokens(search=''){
         const qs=new URLSearchParams({chain:'solana',network:NETWORK});
@@ -1950,7 +2230,7 @@ services:
         if(!tokenSync.ok)console.warn('[gateway-token] sync incomplete:',tokenSync.failed.map(x=>`$${x.name||x.mint}: $${x.error}`).join(' | '));
         const topics=[];
         for(const t of data.tokens||[]){
-          if(t.enabled!==true||!t.mint) continue;
+          if(t.enabled!==true||!isMint(t.mint)) continue;
           const topic=currentEffectiveTopic(data,t.mint).trim();
           if(topic) topics.push(topic);
         }
@@ -1961,7 +2241,7 @@ services:
         for(;;){
           try{
             const next=await getTopics();lastTopicRefreshAt=nowIso();lastError=null;
-            if(!sameArray(next,desiredTopics)){desiredTopics=next;console.log('[ntfy] topics:',next.join(', ')||'(none)');if(streamController)streamController.abort();}
+            if(!sameArray(next,desiredTopics)){desiredTopics=next;console.log('[ntfy] topic subscription count:',next.length);if(streamController)streamController.abort();}
           }catch(e){lastError=`topic refresh: $${e.message||e}`;console.error('[ntfy]',lastError);}
           await sleep(TOPIC_REFRESH_MS);
         }
@@ -1975,7 +2255,9 @@ services:
         const payload={...msg,_handoff:handoff,_gatewayTokenReady:tokenPrep.ok===true,
           _gatewayTokenError:tokenPrep.ok===true?null:(tokenPrep.error||'Gateway token preparation failed'),
           _tradingTopicReady:!state.requirePrivateTradingTopic || String(msg?.topic||'')===state.tradingNtfyTopic};
-        const t=timeoutSignal(120000);
+        // The controller can spend up to 90s awaiting execution and then poll a pending
+        // signature. Keep this handoff longer than that complete bounded resolution path.
+        const t=timeoutSignal(360000);
         let r;
         try {
           r=await fetch(N8N_WEBHOOK,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload),signal:t.signal});
@@ -1988,7 +2270,7 @@ services:
         lastForwardedAt=nowIso();lastForwardedId=msg.id;lastDecision=result?.decision||result?.trade?.status||result?.status||null;
         addAudit('NTFY_DECISION',{id:msg.id,topic:msg.topic,title:msg.title||'',decision:lastDecision});
         claimedHandoffs.delete(msg.id);pendingHandoffs.delete(msg.id);
-        console.log('[ntfy] decision',msg.id,msg.topic,msg.title||'','=>',lastDecision||'OK');
+        console.log('[ntfy] decision',msg.id,'=>',lastDecision||'OK');
       }
       async function streamLoop(){
         for(;;){
@@ -2006,7 +2288,7 @@ services:
               while((idx=buffer.indexOf('\n'))>=0){
                 const line=buffer.slice(0,idx).trim();buffer=buffer.slice(idx+1);if(!line)continue;
                 let msg;try{msg=JSON.parse(line)}catch{continue}
-                if(msg.event!=='message'||!msg.id||seen.has(msg.id))continue;
+                if(msg.event!=='message'||typeof msg.id!=='string'||!msg.id||msg.id.length>128||seen.has(msg.id))continue;
                 addAudit('NTFY_RECEIVED',{id:msg.id,topic:msg.topic,title:msg.title||''});
                 try{
                   await forwardToN8n(msg);
@@ -2019,6 +2301,7 @@ services:
                   throw e;
                 }
               }
+              if(buffer.length>1024*1024)throw new Error('ntfy stream line exceeded 1 MiB');
             }
           }catch(e){
             streamConnected=false;
@@ -2088,6 +2371,7 @@ services:
   gateway-init:
     image: hummingbot/gateway:version-2.15.1@sha256:674d441140f3becaeeb9ad0634cdc8c7b1b1268395b8dd9ee004bd63b15180f2
     restart: 'no'
+    logging: *default-logging
     command:
     - sh
     - -c
@@ -2130,6 +2414,10 @@ services:
   gateway:
     image: hummingbot/gateway:version-2.15.1@sha256:674d441140f3becaeeb9ad0634cdc8c7b1b1268395b8dd9ee004bd63b15180f2
     restart: unless-stopped
+    stop_grace_period: 30s
+    logging: *default-logging
+    extra_hosts:
+    - host.docker.internal:host-gateway
     environment:
       GATEWAY_PASSPHRASE: ${GATEWAY_PASSPHRASE:?GATEWAY_PASSPHRASE is required and must remain stable}
       DEV: 'true'
@@ -2172,6 +2460,7 @@ services:
       set -eu
 
       child=""
+      pending_ack=""
 
       stop_child() {
         if [ -z "$$child" ]; then
@@ -2202,7 +2491,9 @@ services:
       trap 'stop_child; exit 0' TERM INT
 
       while true; do
-        rm -f /gateway-control/restart.request
+        if [ -f /gateway-control/restart.request ]; then
+          pending_ack="$$(cat /gateway-control/restart.request 2>/dev/null || true)"
+        fi
 
         # Track the real Node PID so RPC provider changes always create a fresh Solana instance.
         # --dev explicitly selects HTTP; DEV=true is only interpreted by the image's default command,
@@ -2211,12 +2502,19 @@ services:
         child=$$!
         echo "[gateway-supervisor] Gateway started as PID $$child"
 
+        if [ -n "$$pending_ack" ]; then
+          printf '%s' "$$pending_ack" > /gateway-control/restart.ack.tmp
+          mv -f /gateway-control/restart.ack.tmp /gateway-control/restart.ack
+          rm -f /gateway-control/restart.request
+          pending_ack=""
+        fi
+
         restart_requested=0
 
         while kill -0 "$$child" 2>/dev/null; do
           if [ -f /gateway-control/restart.request ]; then
+            pending_ack="$$(cat /gateway-control/restart.request 2>/dev/null || true)"
             echo "[gateway-supervisor] RPC/config restart requested"
-            rm -f /gateway-control/restart.request
             restart_requested=1
             stop_child
             break
@@ -2240,6 +2538,9 @@ services:
   rpc-configurator:
     image: hummingbot/gateway:version-2.15.1@sha256:674d441140f3becaeeb9ad0634cdc8c7b1b1268395b8dd9ee004bd63b15180f2
     restart: unless-stopped
+    logging: *default-logging
+    extra_hosts:
+    - host.docker.internal:host-gateway
     init: true
     entrypoint:
     - node
@@ -2257,15 +2558,23 @@ services:
       const CONTROL='/gateway-control';
       const TOKEN_FILE=`$${CONTROL}/rpc-config-token`;
       const PUBLIC_RPC='https://api.mainnet-beta.solana.com';
+      const MAINNET_GENESIS_HASH='5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
       const API_KEYS=`$${CONF}/apiKeys.yml`;
       const SOLANA_CHAIN=`$${CONF}/chains/solana.yml`;
       const SOLANA_MAINNET=`$${CONF}/chains/solana/mainnet-beta.yml`;
 
+      function atomicText(path,value){
+        const tmp=`$${path}.tmp`;
+        fs.writeFileSync(tmp,String(value),{mode:0o600});
+        fs.renameSync(tmp,path);
+      }
       fs.mkdirSync(CONTROL,{recursive:true});
       if(!fs.existsSync(TOKEN_FILE)){
-        fs.writeFileSync(TOKEN_FILE,crypto.randomBytes(32).toString('hex'),{mode:0o600});
+        atomicText(TOKEN_FILE,crypto.randomBytes(32).toString('hex'));
       }
       const accessToken=fs.readFileSync(TOKEN_FILE,'utf8').trim();
+      if(!/^[a-f0-9]{64}$$/.test(accessToken))
+        throw new Error('Persisted RPC-control token is invalid; restore a known-good gateway_control backup');
 
       function readYaml(path){
         try{return yaml.load(fs.readFileSync(path,'utf8'))||{};}catch(e){throw new Error(`Cannot read $${path}: $${e.message}`);}
@@ -2295,6 +2604,7 @@ services:
           const u=new URL(String(raw||''));
           if(u.username)u.username='***';
           if(u.password)u.password='***';
+          if(u.pathname&&u.pathname!=='/')u.pathname='/***';
           if([...u.searchParams.keys()].length){
             for(const k of [...u.searchParams.keys()])u.searchParams.set(k,'***');
           }
@@ -2307,22 +2617,43 @@ services:
         if(!u.hostname)throw new Error('RPC URL hostname is missing');
         return u.toString();
       }
+      function rpcUrlFingerprint(raw){
+        const u=new URL(String(raw||''));
+        u.hash='';
+        u.searchParams.sort();
+        return crypto.createHash('sha256').update(u.toString()).digest('hex');
+      }
+      function requestGatewayRestart(rpcUrl){
+        const requestId=crypto.randomBytes(16).toString('hex');
+        try{fs.unlinkSync(`$${CONTROL}/restart.ack`);}catch(e){if(e?.code!=='ENOENT')throw e;}
+        atomicText(`$${CONTROL}/restart.request`,requestId);
+        return {requestId,rpcUrlHash:rpcUrlFingerprint(rpcUrl)};
+      }
       async function testSolanaRpc(url){
         const c=new AbortController();
-        const timer=setTimeout(()=>c.abort(),12000);
+        const timer=setTimeout(()=>c.abort(),20000);
         try{
-          const r=await fetch(url,{
-            method:'POST',
-            headers:{'content-type':'application/json'},
-            body:JSON.stringify({jsonrpc:'2.0',id:1,method:'getLatestBlockhash',params:[{commitment:'confirmed'}]}),
-            signal:c.signal
-          });
-          const j=await r.json().catch(()=>null);
-          if(!r.ok)throw new Error(`RPC HTTP $${r.status}`);
-          const blockhash=j?.result?.value?.blockhash;
-          const slot=Number(j?.result?.context?.slot);
-          if(!blockhash||!Number.isFinite(slot))throw new Error(j?.error?.message||'RPC did not return a valid mainnet-style blockhash response');
-          return {slot};
+          const call=async(method,params=[])=>{
+            const r=await fetch(url,{
+              method:'POST',
+              headers:{'content-type':'application/json'},
+              body:JSON.stringify({jsonrpc:'2.0',id:method,method,params}),
+              signal:c.signal
+            });
+            const j=await r.json().catch(()=>null);
+            if(!r.ok)throw new Error(`RPC HTTP $${r.status} while calling $${method}`);
+            if(j?.error)throw new Error(j.error.message||`RPC $${method} failed`);
+            return j?.result;
+          };
+          const genesisHash=String(await call('getGenesisHash')||'');
+          if(genesisHash!==MAINNET_GENESIS_HASH)
+            throw new Error(`RPC is not Solana mainnet-beta (unexpected genesis hash $${genesisHash||'missing'})`);
+          const latest=await call('getLatestBlockhash',[{commitment:'confirmed'}]);
+          const blockhash=String(latest?.value?.blockhash||'');
+          const slot=latest?.context?.slot;
+          if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$$/.test(blockhash)||!Number.isSafeInteger(slot)||slot<0)
+            throw new Error('RPC did not return a valid confirmed mainnet-beta blockhash response');
+          return {slot,genesisHash};
         }finally{clearTimeout(timer);}
       }
       function currentStatus(){
@@ -2356,7 +2687,8 @@ services:
           const supplied=String(input.heliusApiKey||'').trim();
           const existing=String(keys.helius||'').trim();
           const apiKey=supplied||existing;
-          if(apiKey.length<8)throw new Error('Enter a valid Helius API key (or keep the already configured key)');
+          if(!/^[-_A-Za-z0-9]{8,200}$$/.test(apiKey))
+            throw new Error('Enter a valid Helius API key (letters, numbers, hyphens, or underscores) or keep the already configured key');
           testUrl=`https://mainnet.helius-rpc.com/?api-key=$${encodeURIComponent(apiKey)}`;
           const result=await testSolanaRpc(testUrl);
           keys.helius=apiKey;
@@ -2365,10 +2697,12 @@ services:
           // because v2.15.1 logs config update values.
           atomicYaml(API_KEYS,keys);
           atomicYaml(SOLANA_CHAIN,sol);
-          fs.writeFileSync(`$${CONTROL}/restart.request`,JSON.stringify({at:new Date().toISOString(),provider:'helius'}),{mode:0o600});
-          return {provider:'helius',tested:true,slot:result.slot,endpoint:'https://mainnet.helius-rpc.com/?api-key=***'};
+          const restart=requestGatewayRestart(testUrl);
+          return {provider:'helius',tested:true,slot:result.slot,endpoint:'https://mainnet.helius-rpc.com/?api-key=***',...restart};
         }else{
           testUrl=validateRpcUrl(input.customRpcUrl);
+          if(new URL(testUrl).hostname.toLowerCase().replace(/\.+$$/,'')==='api.mainnet-beta.solana.com')
+            throw new Error('Choose Solana Public for the official public endpoint; it is Testing-only and cannot satisfy Trading readiness');
         }
 
         const result=await testSolanaRpc(testUrl);
@@ -2376,19 +2710,24 @@ services:
         net.nodeURL=testUrl;
         atomicYaml(SOLANA_CHAIN,sol);
         atomicYaml(SOLANA_MAINNET,net);
-        fs.writeFileSync(`$${CONTROL}/restart.request`,JSON.stringify({at:new Date().toISOString(),provider}),{mode:0o600});
-        return {provider,tested:true,slot:result.slot,endpoint:redactUrl(testUrl)};
+        const restart=requestGatewayRestart(testUrl);
+        return {provider,tested:true,slot:result.slot,endpoint:redactUrl(testUrl),...restart};
       }
 
+      let applyInProgress=false;
       const server=http.createServer(async(req,res)=>{
         try{
           if(req.url==='/healthz')return send(res,200,{ok:true});
           if(!authorised(req))return send(res,401,{ok:false,error:'unauthorised'});
           if(req.method==='GET'&&req.url==='/status')return send(res,200,{ok:true,...currentStatus()});
           if(req.method==='POST'&&req.url==='/apply'){
-            const input=await body(req);
-            const result=await applyRpc(input);
-            return send(res,200,{ok:true,...result});
+            if(applyInProgress)return send(res,409,{ok:false,error:'RPC provider change already in progress'});
+            applyInProgress=true;
+            try{
+              const input=await body(req);
+              const result=await applyRpc(input);
+              return send(res,200,{ok:true,...result});
+            }finally{applyInProgress=false;}
           }
           return send(res,404,{ok:false,error:'not found'});
         }catch(e){
@@ -2425,6 +2764,7 @@ services:
   n8n-permissions:
     image: alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
     restart: 'no'
+    logging: *default-logging
     user: 0:0
     command:
     - sh
@@ -2445,6 +2785,7 @@ services:
   n8n-bootstrap:
     image: docker.n8n.io/n8nio/n8n:2.31.6@sha256:3c07c723326dd72e46a6969181c66a75260b7a204b9b77ba1ece6d594489c684
     restart: 'no'
+    logging: *default-logging
     entrypoint:
     - /bin/sh
     - -c
