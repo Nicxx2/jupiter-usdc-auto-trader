@@ -2,6 +2,21 @@
 
 Notable release changes are recorded here. Versions follow semantic versioning: safety fixes and compatible deployment improvements increment the patch version; incompatible configuration or behavior changes require a larger increment and explicit migration guidance.
 
+## [10.2.4] - 2026-08-15
+
+### Responsive dashboard and device usability
+
+- Added viewport-based responsive layouts without user-agent detection or a separate mobile application; the existing desktop presentation remains the baseline.
+- Converted the information-rich Coins / Automation and Recent Trades tables into labelled mobile cards below the narrow-screen breakpoint while preserving exact mints, targets, topics, wallet assignments, AUTO controls, statuses, and signatures.
+- Kept one single authoritative form control for every wallet, AUTO direction, mode, MASTER, and confirmation action so responsive presentation cannot introduce duplicated or hidden submitted values.
+- Added single-column phone layouts, touch-sized buttons and fields, visible keyboard focus, safe-area spacing for notches and gesture bars, and bounded wrapping for long mints, topics, wallet names, RPC URLs, timestamps, and signatures.
+- Improved mobile input behavior with numeric keyboards for safety values, confirmation-oriented keyboard hints, and appropriate password autocomplete metadata.
+- Applied bounded responsive layouts to the dashboard header, TESTING/TRADING and MASTER cards, readiness results, wallets, balances, trigger protection, RPC, safety settings, safety-lock recovery, login, one-time wallet recovery, and Gateway diagnostics.
+- Added five responsive safety invariants, bringing the dependency-free suite to 43 tests while retaining all existing transaction, persistence, RPC, Gateway, and n8n workflow coverage.
+- Added the local `.codex-remote-attachments/` cache to `.gitignore` so user-supplied review images cannot be committed accidentally.
+
+The embedded 52-node `JATCommunity1022` workflow, transaction routes, persistent state schemas, authentication, and trading decisions are unchanged in this presentation-focused patch.
+
 ## [10.2.3] - 2026-08-15
 
 ### Edge-case and lifecycle hardening

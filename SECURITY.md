@@ -20,7 +20,7 @@ If private vulnerability reporting is not enabled, contact the repository owner 
 
 ## Supported version
 
-Security fixes are targeted at the current `v10.2.3` one-Compose baseline unless a newer supported release is published. Infrastructure images are pinned by tag and immutable digest; version or digest upgrades need separate compatibility and commissioning tests.
+Security fixes are targeted at the current `v10.2.4` one-Compose baseline unless a newer supported release is published. Infrastructure images are pinned by tag and immutable digest; version or digest upgrades need separate compatibility and commissioning tests.
 
 ## Deployment security
 

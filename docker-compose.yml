@@ -219,7 +219,7 @@ services:
       const RPC_TOKEN_FILE = `$${RPC_CONTROL_DIR}/rpc-config-token`;
       const RPC_RESTART_ACK_FILE = `$${RPC_CONTROL_DIR}/restart.ack`;
       const NTFY = resolveNtfyServer(process.env.NTFY_SERVER || 'https://ntfy.sh');
-      const APP_VERSION = '10.2.3';
+      const APP_VERSION = '10.2.4';
       const NETWORK = process.env.SOLANA_NETWORK || 'mainnet-beta';
       const TOPIC_REFRESH_MS = Number(process.env.TOPIC_REFRESH_SECONDS || 15) * 1000;
       const LOOKBACK = process.env.NTFY_LOOKBACK || '5m';
@@ -1185,27 +1185,27 @@ services:
                 : '❌ Assigned wallet missing from Gateway')
             : '⚪ Unassigned';
           return `<tr>
-            <td><b>$${html(t.name)}</b><div class="mint">$${html(t.mint)}</div></td>
-            <td>$${t.enabled ? '✅ Enabled' : '⛔ Disabled'}</td>
-            <td>$${html(formatBalance(t.usd_amount,6))} USDC</td>
-            <td>
+            <td class="coin-identity" data-label="Coin"><b>$${html(t.name)}</b><div class="mint">$${html(t.mint)}</div></td>
+            <td data-label="Source">$${t.enabled ? '✅ Enabled' : '⛔ Disabled'}</td>
+            <td data-label="Scenario">$${html(formatBalance(t.usd_amount,6))} USDC</td>
+            <td data-label="Configured targets">
               <small><b>BUY:</b> $${buyConfigured ? html(buyTargets.map(formatPrice).join(', ')) : '<span class="muted">No target</span>'}<br>
               <b>SELL:</b> $${sellConfigured ? html(sellTargets.map(formatPrice).join(', ')) : '<span class="muted">No target</span>'}</small>
             </td>
-            <td><small>$${html(s.ntfy_effective_topic || t.ntfy_topic || '—')}</small></td>
-            <td><select name="wallet_$${html(t.mint)}">$${walletOptions}</select><div class="muted" style="margin-top:5px">$${assignmentStatus}</div></td>
-            <td>
-              <label title="$${buyConfigured?'Triggered only by a fresh Jupiter BUY ntfy alert':'Configure a BUY target in Jupiter Alerts first'}">
+            <td data-label="ntfy topic"><small class="breakable">$${html(s.ntfy_effective_topic || t.ntfy_topic || '—')}</small></td>
+            <td data-label="Trading wallet"><select name="wallet_$${html(t.mint)}" aria-label="Trading wallet for $${html(t.name)}">$${walletOptions}</select><div class="muted" style="margin-top:5px">$${assignmentStatus}</div></td>
+            <td data-label="Automation">
+              <label class="toggle-line" title="$${buyConfigured?'Triggered only by a fresh Jupiter BUY ntfy alert':'Configure a BUY target in Jupiter Alerts first'}">
                 <input type="checkbox" name="autoBuy_$${html(t.mint)}" $${c.autoBuy ? 'checked' : ''} $${t.enabled&&buyConfigured ? '' : 'disabled'}> AUTO BUY
               </label>
               $${buyConfigured?'':'<small class="muted"> · no BUY target</small>'}<br>
-              <label title="$${sellConfigured?'Triggered only by a fresh Jupiter SELL ntfy alert':'Configure a SELL target in Jupiter Alerts first'}">
+              <label class="toggle-line" title="$${sellConfigured?'Triggered only by a fresh Jupiter SELL ntfy alert':'Configure a SELL target in Jupiter Alerts first'}">
                 <input type="checkbox" name="autoSell_$${html(t.mint)}" $${c.autoSell ? 'checked' : ''} $${t.enabled&&sellConfigured ? '' : 'disabled'}> AUTO SELL
               </label>
               $${sellConfigured?'':'<small class="muted"> · no SELL target</small>'}
             </td>
           </tr>`;
-        }).join('');
+        }).join('') || '<tr class="empty-row"><td colspan="7"><div class="empty">No coin configuration is currently available from Jupiter USDC Price Alerts.</div></td></tr>';
 
         let balanceRows = '';
         if (state.selectedWallet) {
@@ -1238,7 +1238,7 @@ services:
             <div style="margin:8px 0">Assigned coins: <b>$${html(assignedCoins.join(', ') || 'None')}</b></div>
             <form method="post" action="/admin/wallet/rename" style="margin:6px 0">$${csrf}
               <input type="hidden" name="address" value="$${html(a)}">
-              <input name="nickname" maxlength="40" value="$${html(nick)}" placeholder="Optional nickname">
+              <input name="nickname" aria-label="Nickname for $${html(nick || a)}" maxlength="40" value="$${html(nick)}" placeholder="Optional nickname">
               <button>Save name</button>
             </form>
             $${selected ? '' : `<form method="post" action="/admin/wallet/select" style="margin:6px 0">$${csrf}
@@ -1273,14 +1273,14 @@ services:
         ).join('') : '<p class="muted">Run Quick Test Everything to populate readiness.</p>';
 
         const tradesHtml = trades.slice(-10).reverse().map(t =>
-          `<tr><td>$${html(t.at || t.updatedAt)}</td><td>$${html(t.name)}</td><td>$${html(t.direction)}</td><td>$${html(t.status)}</td><td>$${Number.isFinite(Number(t.priceImpactPercent))?html(Number(t.priceImpactPercent).toFixed(2)+'%'):'—'}</td><td class="mint">$${html(t.signature || '—')}</td></tr>`
-        ).join('') || '<tr><td colspan="6"><div class="empty">No live trades yet.</div></td></tr>';
+          `<tr><td data-label="Time">$${html(t.at || t.updatedAt)}</td><td data-label="Token">$${html(t.name)}</td><td data-label="Side">$${html(t.direction)}</td><td data-label="Status">$${html(t.status)}</td><td data-label="Impact">$${Number.isFinite(Number(t.priceImpactPercent))?html(Number(t.priceImpactPercent).toFixed(2)+'%'):'—'}</td><td data-label="Signature" class="mint">$${html(t.signature || '—')}</td></tr>`
+        ).join('') || '<tr class="empty-row"><td colspan="6"><div class="empty">No live trades yet.</div></td></tr>';
 
         const warning = auth.mustChange ? `<div class="banner bad">Change the first-run admin password before Trading Mode can be enabled.</div>` : '';
         const lock = state.safetyLock ? `<div class="banner bad"><b>SAFETY LOCK:</b> $${html(state.safetyReason || 'An uncertain transaction requires review.')}</div>` : '';
 
-        return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-      <title>Jupiter Auto Trader</title>
+        return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+      <title>Jupiter Auto Trader v$${APP_VERSION}</title>
       <style>
       body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#0f1217;color:#edf2f7;margin:0}
       .wrap{max-width:1200px;margin:26px auto;padding:0 16px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}.version{display:inline-block;margin-left:8px;padding:3px 7px;border:1px solid #3a4656;border-radius:999px;color:#aeb9c7;font-size:12px;font-weight:600;vertical-align:middle}
@@ -1288,7 +1288,7 @@ services:
       .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;align-items:start;grid-auto-rows:max-content}
       .banner{padding:12px 14px;border-radius:10px;margin:10px 0}.good{background:#10291a;border:1px solid #285e38}.bad{background:#351718;border:1px solid #7d3034}.warn{background:#332814;border:1px solid #725b28}
       .mode{font-size:22px;font-weight:800}.testing{color:#ffd36a}.trading{color:#74f09a}.muted{color:#9aa7b7}.mint{font-family:ui-monospace,monospace;font-size:11px;word-break:break-all;color:#a5b1c0}
-      button{border:0;border-radius:9px;padding:9px 13px;font-weight:700;cursor:pointer}input,select{padding:8px;border-radius:7px;border:1px solid #48515e;background:#10141a;color:#fff}
+      button{border:0;border-radius:9px;padding:9px 13px;font-weight:700;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.58}input,select{padding:8px;border-radius:7px;border:1px solid #48515e;background:#10141a;color:#fff}
       table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid #29303a;vertical-align:top}th{color:#a8b4c3;font-size:12px;text-transform:uppercase}
       .check{display:flex;justify-content:space-between;gap:15px;padding:7px 0;border-bottom:1px solid #29303a}.check small{text-align:right;color:#9aa7b7}
       a{color:#9dcbff}.inline{display:inline}.danger{background:#7b2226;color:#fff}.primary{background:#e8edf5;color:#101216}.safe{background:#1e6937;color:#fff}
@@ -1302,11 +1302,45 @@ services:
       .panelbody{padding:16px 18px}.summarymeta{font-size:12px;font-weight:500;color:#94a3b5;margin-left:auto;text-align:right}
       .statusrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.chip{font-size:12px;padding:5px 8px;border-radius:999px;background:#222934;border:1px solid #333d4b;color:#c6d0db}.chip.ok{background:#10291a;border-color:#285e38}.chip.warnchip{background:#332814;border-color:#725b28}
       .hero{padding:16px 18px}.hero h2{margin:0 0 8px}.compactline{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.sectiontitle{margin:22px 2px 8px;color:#9aa7b7;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
-      .empty{padding:20px;text-align:center;color:#91a0b2}
-      @media(max-width:700px){table{display:block;overflow-x:auto}.check{display:block}.check small{display:block;text-align:left;margin-left:25px}.summarymeta{display:none}}
+      .empty{padding:20px;text-align:center;color:#91a0b2}.breakable{overflow-wrap:anywhere;word-break:break-word}.toggle-line{display:inline-flex;align-items:center;gap:6px}
+      :focus-visible{outline:3px solid #79b8ff;outline-offset:3px}
+      @media(max-width:1100px){
+        table.mobile-cards,table.mobile-cards *{box-sizing:border-box}
+        table.mobile-cards,table.mobile-cards tbody,table.mobile-cards tr{display:block;width:100%}
+        table.mobile-cards thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+        table.mobile-cards tr{margin:0 0 12px;padding:14px;border:1px solid #303846;border-radius:11px;background:#12161c}
+        table.mobile-cards td{display:grid;grid-template-columns:minmax(118px,28%) minmax(0,1fr);gap:12px;border:0;border-bottom:1px solid #29303a;padding:9px 0;min-width:0;overflow-wrap:anywhere}
+        table.mobile-cards td:last-child{border-bottom:0;padding-bottom:0}
+        table.mobile-cards td:before{content:attr(data-label);color:#a8b4c3;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
+        table.mobile-cards td.coin-identity{display:block;padding-top:0}
+        table.mobile-cards td.coin-identity:before{display:none}
+        table.mobile-cards td[colspan]{display:block;padding:0;border:0}
+        table.mobile-cards td[colspan]:before{display:none}
+        table.mobile-cards .empty{padding:8px}
+        .coins-table select{width:100%;max-width:100%;min-width:0}
+      }
+      @media(max-width:700px){
+        *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+        .wrap{margin:0 auto;padding-top:max(12px,env(safe-area-inset-top));padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));padding-bottom:max(16px,env(safe-area-inset-bottom))}
+        .top{gap:10px}.top h1{font-size:clamp(22px,7vw,28px);line-height:1.2;margin:8px 0}.version{margin-left:5px;font-size:11px}.top>div{min-width:0;max-width:100%}.top-links a{display:inline-flex;align-items:center;min-height:44px}
+        .grid{grid-template-columns:minmax(0,1fr);gap:10px}.card,.hero{padding:14px;margin:10px 0}.compactline{align-items:stretch}.compactline>div,.compactline>form{width:100%;min-width:0;text-align:left!important}
+        .hero form input:not([type="hidden"]),.hero form button{display:block;width:100%;min-width:0;min-height:44px;margin-top:8px;font-size:16px}
+        details.panel{margin:10px 0}.panelbody{padding:14px}.summarymeta{display:none}details.panel>summary{min-height:48px;padding:13px 14px;gap:10px}
+        .check{display:block}.check small{display:block;text-align:left;margin:4px 0 0 0;overflow-wrap:anywhere}.statusrow{gap:6px}.chip{font-size:11px}
+        .walletgrid{grid-template-columns:minmax(0,1fr)}.walletcard{min-width:0;overflow-wrap:anywhere}.pill{display:inline-block;margin:5px 0 0 0}
+        .panelbody form input:not([type="hidden"]):not([type="checkbox"]),.panelbody form select,.panelbody form button,.card form input:not([type="hidden"]):not([type="checkbox"]),.card form select,.card form button{display:block;width:100%;max-width:100%;min-width:0!important;min-height:44px;margin-left:0!important;margin-top:8px;font-size:16px}
+        .panelbody form input[type="checkbox"],.card form input[type="checkbox"]{width:22px;height:22px;min-height:22px;flex:0 0 auto}.panelbody .toggle-line,.card .toggle-line{min-height:44px}.panelbody details>summary{display:flex;align-items:center;min-height:44px}
+        h1,h2,h3,p,.banner,.muted{overflow-wrap:anywhere}.sectiontitle{margin-top:18px}.empty{padding:14px}
+      }
+      @media(max-width:420px){
+        .wrap{padding-left:max(9px,env(safe-area-inset-left));padding-right:max(9px,env(safe-area-inset-right))}.card,.hero,.panelbody{padding:12px}
+        table.mobile-cards tr{padding:12px}table.mobile-cards td{grid-template-columns:minmax(92px,34%) minmax(0,1fr);gap:9px}
+      }
+      @media(hover:none) and (pointer:coarse){button,select,input:not([type="hidden"]):not([type="checkbox"]){min-height:44px;font-size:16px}.toggle-line{min-height:44px}input[type="checkbox"]{width:22px;height:22px}details.panel>summary,.panelbody details>summary{min-height:48px}.top-links a,.panelbody p>a{display:inline-flex;align-items:center;min-height:44px}}
+      @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
       </style></head><body><div class="wrap">
       <div class="top"><div><h1>🤖 Jupiter Auto Trader <span class="version">v$${APP_VERSION}</span></h1><div class="muted">Jupiter USDC Price Alerts → ntfy → n8n → Hummingbot Gateway</div></div>
-      <div><span class="muted">Workflow engine: internal</span> &nbsp; <a href="/machine.json" target="_blank">Diagnostics ↗</a></div></div>
+      <div class="top-links"><span class="muted">Workflow engine: internal</span> &nbsp; <a href="/machine.json" target="_blank">Diagnostics ↗</a></div></div>
       $${notice ? `<div class="banner good">$${html(notice)}</div>` : ''}$${warning}$${lock}
 
       <div class="grid">
@@ -1343,7 +1377,7 @@ services:
           <form method="post" action="/admin/mode">$${csrf}
           $${modeTrading
             ? '<input type="hidden" name="mode" value="testing"><button class="primary">Switch to TESTING</button>'
-            : '<input type="hidden" name="mode" value="trading"><input name="confirm" placeholder="type ENABLE TRADING"><button class="danger">Enable TRADING</button>'}
+            : '<input type="hidden" name="mode" value="trading"><input name="confirm" aria-label="Type ENABLE TRADING to confirm" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done" placeholder="type ENABLE TRADING"><button class="danger">Enable TRADING</button>'}
           </form>
         </div>
         <p class="muted" style="margin-bottom:0">Every controller restart returns to TESTING with MASTER OFF.</p>
@@ -1365,8 +1399,8 @@ services:
       <div class="card">
       <h2>Coins / Automation</h2>
       $${appError ? `<div class="banner bad">App API: $${html(appError)}</div>` : ''}
-      <form method="post" action="/admin/controls">$${csrf}
-      <table><thead><tr><th>Coin</th><th>Source</th><th>Scenario</th><th>Configured targets</th><th>ntfy</th><th>Trading wallet</th><th>Automation</th></tr></thead><tbody>$${rows}</tbody></table>
+      <form class="controls-form" method="post" action="/admin/controls">$${csrf}
+      <table class="mobile-cards coins-table" aria-label="Coin automation controls"><thead><tr><th>Coin</th><th>Source</th><th>Scenario</th><th>Configured targets</th><th>ntfy</th><th>Trading wallet</th><th>Automation</th></tr></thead><tbody>$${rows}</tbody></table>
       <p class="muted"><b>Configured targets are reference/validation data, not an armed-state indicator.</b> A trade starts only from a fresh normal BUY/SELL ntfy alert. After Jupiter Alerts fires a target it may show that source alert as inactive until reset/cooldown; that is normal and does not need to be mirrored here. Trading Wallet is attached to the exact mint. Saving controls/assignments returns to TESTING with MASTER OFF.</p>
       <div style="margin-top:14px"><button class="primary">Save coin controls</button></div></form>
       </div>
@@ -1374,7 +1408,7 @@ services:
       <div class="card">
         <div class="compactline"><h2 style="margin:0">Recent Trades</h2><span class="muted">Latest activity</span></div>
         <div style="margin-top:10px">
-          <table><thead><tr><th>Time</th><th>Token</th><th>Side</th><th>Status</th><th>Impact</th><th>Signature</th></tr></thead><tbody>$${tradesHtml}</tbody></table>
+          <table class="mobile-cards trades-table" aria-label="Recent trade history"><thead><tr><th>Time</th><th>Token</th><th>Side</th><th>Status</th><th>Impact</th><th>Signature</th></tr></thead><tbody>$${tradesHtml}</tbody></table>
         </div>
       </div>
 
@@ -1391,14 +1425,14 @@ services:
       <p><b>Automatic trades do not rely on this default.</b> Each coin uses its explicitly assigned Trading Wallet. Switching the viewed/default wallet still forces <b>TESTING MODE + MASTER OFF</b> as a safe configuration change.</p>
 
       <form method="post" action="/admin/wallet/create">$${csrf}
-        <input name="nickname" maxlength="40" placeholder="Optional nickname, e.g. Small Test Wallet">
+        <input name="nickname" aria-label="Optional nickname for the new wallet" maxlength="40" placeholder="Optional nickname, e.g. Small Test Wallet">
         <button class="safe" $${state.mode==='testing' && !state.master && !activeTradeLock ? '' : 'disabled'}>➕ Create new dedicated bot wallet</button>
       </form>
       <p class="muted">The nickname is stored only by this controller. Gateway/Solana identify wallets by address. Creation requires TESTING mode, MASTER OFF, and no trade in progress.</p>
 
       <div class="walletgrid">$${walletCards}</div>
       $${state.selectedWallet && !state.walletBackups[state.selectedWallet] ? `<div class="banner warn"><b>Selected wallet backup is not confirmed.</b>
-      <form method="post" action="/admin/wallet/mark-backed-up">$${csrf}<input name="confirm" placeholder="type I HAVE THE KEY"><button>Mark selected wallet backed up</button></form></div>` : ''}
+      <form method="post" action="/admin/wallet/mark-backed-up">$${csrf}<input name="confirm" aria-label="Type I HAVE THE KEY to confirm" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done" placeholder="type I HAVE THE KEY"><button>Mark selected wallet backed up</button></form></div>` : ''}
       <p class="muted">There is intentionally no one-click Delete Wallet button. Removing an encrypted signer is an advanced recovery-sensitive action.</p>
       </div>
       </details>
@@ -1410,7 +1444,7 @@ services:
       </summary>
       <div class="panelbody">
       <h3 style="margin-top:0">Viewed wallet balances</h3>
-      $${state.selectedWallet ? `<table><thead><tr><th>Asset</th><th>Balance</th></tr></thead><tbody>$${balanceRows}</tbody></table>` : '<p>No wallet selected.</p>'}
+      $${state.selectedWallet ? `<table class="balance-table" aria-label="Selected wallet balances"><thead><tr><th>Asset</th><th>Balance</th></tr></thead><tbody>$${balanceRows}</tbody></table>` : '<p>No wallet selected.</p>'}
       <p class="muted">Balances are read live through Gateway. Auto BUY checks USDC; Auto SELL checks the exact token mint; every real trade also checks the SOL reserve immediately before execution. Wrapped SOL uses the native SOL balance, and a SOL SELL preserves the configured reserve in addition to its sale amount.</p>
       </div>
       </details>
@@ -1420,7 +1454,7 @@ services:
       <div class="panelbody">
       <h3 style="margin-top:0">ntfy Topic Policy</h3>
       <form method="post" action="/admin/ntfy/policy">$${csrf}
-        <label>
+        <label class="toggle-line">
           <input type="checkbox" name="requirePrivateTradingTopic" $${state.requirePrivateTradingTopic?'checked':''}>
           Require private Trading Topic for real trading
         </label>
@@ -1441,7 +1475,7 @@ services:
           <p class="muted">Use this generated value if you want the stricter private-topic mode. It is optional.</p>
           $${state.requirePrivateTradingTopic?tradingTopicRows:''}
           <form method="post" action="/admin/ntfy/rotate">$${csrf}
-            <input name="confirm" placeholder="type ROTATE TRADING TOPIC">
+            <input name="confirm" aria-label="Type ROTATE TRADING TOPIC to confirm" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done" placeholder="type ROTATE TRADING TOPIC">
             <button class="danger">Rotate generated topic</button>
           </form>
         </div>
@@ -1450,7 +1484,7 @@ services:
       <h3>Price-threshold replay guards</h3>
       $${triggerGuardHtml}
       <p class="muted">Default real-money behaviour mirrors the alert idea: a price threshold cannot be traded repeatedly just because duplicate/forged ntfy events arrive.</p>
-      $${activeGuards.length ? `<form method="post" action="/admin/guards/reset">$${csrf}<input name="confirm" placeholder="type RESET TRIGGER GUARDS"> <button class="danger">Reset all trigger guards</button></form>
+      $${activeGuards.length ? `<form method="post" action="/admin/guards/reset">$${csrf}<input name="confirm" aria-label="Type RESET TRIGGER GUARDS to confirm" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done" placeholder="type RESET TRIGGER GUARDS"> <button class="danger">Reset all trigger guards</button></form>
       <p class="muted">Only use this after intentionally resetting/re-arming price alerts in Jupiter USDC Price Alerts. This action also forces TESTING + MASTER OFF.</p>` : ''}
       </div>
       </details>
@@ -1495,17 +1529,17 @@ services:
       <summary><span>⚙️ Safety settings</span><span class="summarymeta">Impact ≤$${html(state.maxPriceImpactPct)}% · Trade ≤$${html(state.maxTradeUSDC)} USDC · SOL $${html(state.minSolReserve)}</span></summary>
       <div class="panelbody">
       <form method="post" action="/admin/safety">$${csrf}
-      <label>Minimum SOL reserve<br><input type="number" name="minSolReserve" step="0.001" min="0.001" value="$${html(state.minSolReserve)}"></label><br><br>
-      <label>Gateway slippage %<br><input type="number" name="slippagePct" step="0.1" min="0" max="10" value="$${html(state.slippagePct)}"></label><br>
+      <label>Minimum SOL reserve<br><input type="number" inputmode="decimal" name="minSolReserve" step="0.001" min="0.001" value="$${html(state.minSolReserve)}"></label><br><br>
+      <label>Gateway slippage %<br><input type="number" inputmode="decimal" name="slippagePct" step="0.1" min="0" max="10" value="$${html(state.slippagePct)}"></label><br>
       <span class="muted">Tolerance for price movement after a quote. This is different from price impact.</span><br><br>
-      <label>Maximum price impact %<br><input type="number" name="maxPriceImpactPct" step="0.1" min="0.1" max="25" value="$${html(state.maxPriceImpactPct)}"></label><br>
+      <label>Maximum price impact %<br><input type="number" inputmode="decimal" name="maxPriceImpactPct" step="0.1" min="0.1" max="25" value="$${html(state.maxPriceImpactPct)}"></label><br>
       <span class="muted">Hard block on every Gateway quote. Jupiter reports impact as a decimal; the controller converts it to % before comparing.</span><br><br>
-      <label>Maximum trade scenario (USDC)<br><input type="number" name="maxTradeUSDC" step="1" min="1" max="1000000" value="$${html(state.maxTradeUSDC)}"></label><br>
+      <label>Maximum trade scenario (USDC)<br><input type="number" inputmode="decimal" name="maxTradeUSDC" step="1" min="1" max="1000000" value="$${html(state.maxTradeUSDC)}"></label><br>
       <span class="muted">Independent cap protecting against an accidental oversized usd_amount in Jupiter Alerts.</span><br><br>
       <label>Multiple thresholds<br><select name="burstPolicy">
       <option value="collapse" $${state.burstPolicy==='collapse'?'selected':''}>Safest: one real trade per coin/direction burst</option>
       <option value="every-alert" $${state.burstPolicy==='every-alert'?'selected':''}>Advanced: trade every fired alert</option></select></label><br><br>
-      <label>Burst window seconds<br><input type="number" name="burstWindowSec" min="5" max="300" value="$${html(state.burstWindowSec)}"></label><br><br>
+      <label>Burst window seconds<br><input type="number" inputmode="numeric" name="burstWindowSec" min="5" max="300" value="$${html(state.burstWindowSec)}"></label><br><br>
       <button>Save safety settings</button>
       </form>
       </div>
@@ -1524,11 +1558,11 @@ services:
       </details>
 
       $${state.safetyLock ? `<div class="card"><h2>Resolve safety lock</h2><p>Only clear this after checking the wallet/transaction state. No automatic retry is performed.</p>
-      <form method="post" action="/admin/clear-lock">$${csrf}<input name="confirm" placeholder="type CLEAR SAFETY LOCK"> <button class="danger">Clear lock</button></form></div>` : ''}
+      <form method="post" action="/admin/clear-lock">$${csrf}<input name="confirm" aria-label="Type CLEAR SAFETY LOCK to confirm" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done" placeholder="type CLEAR SAFETY LOCK"> <button class="danger">Clear lock</button></form></div>` : ''}
 
 
       $${auth.mustChange ? `<div class="card"><h2>Change first-run password</h2><form method="post" action="/admin/change-password">$${csrf}
-      <input type="password" name="password" minlength="12" maxlength="256" placeholder="new password (12+ chars)"> <input type="password" name="confirm" minlength="12" maxlength="256" placeholder="repeat">
+      <input type="password" name="password" aria-label="New admin password" autocomplete="new-password" minlength="12" maxlength="256" placeholder="new password (12+ chars)"> <input type="password" name="confirm" aria-label="Repeat new admin password" autocomplete="new-password" minlength="12" maxlength="256" placeholder="repeat">
       <button>Change password</button></form></div>` : ''}
 
       <div class="card"><form method="post" action="/logout">$${csrf}<button>Log out</button></form>
@@ -1539,23 +1573,23 @@ services:
       }
 
       function loginPage(error = '') {
-        return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Trading Login</title>
-      <style>body{font-family:system-ui;background:#101216;color:#eef2f7}.box{max-width:420px;margin:12vh auto;background:#171b22;padding:24px;border-radius:14px}input,button{box-sizing:border-box;width:100%;padding:12px;margin:8px 0;border-radius:8px}.bad{color:#ff9299}</style></head>
+        return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Trading Login · v$${APP_VERSION}</title>
+      <style>body{font-family:system-ui;background:#101216;color:#eef2f7}.box{max-width:420px;margin:12vh auto;background:#171b22;padding:24px;border-radius:14px}input,button{box-sizing:border-box;width:100%;padding:12px;margin:8px 0;border-radius:8px}.bad{color:#ff9299}:focus-visible{outline:3px solid #79b8ff;outline-offset:3px}@media(max-width:600px){html{-webkit-text-size-adjust:100%}*{box-sizing:border-box}body{margin:0;min-height:100dvh;padding:max(14px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) max(14px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left));display:grid;align-items:center}.box{width:100%;margin:0;padding:20px}.box h1{font-size:clamp(23px,7vw,30px);overflow-wrap:anywhere}input,button{min-height:48px;font-size:16px}}@media(hover:none) and (pointer:coarse){input,button{min-height:48px;font-size:16px}}</style></head>
       <body><div class="box"><h1>🤖 Jupiter Auto Trader</h1>$${error ? `<p class="bad">$${html(error)}</p>` : ''}
       <p>Enter the admin password.</p>$${auth.mustChange ? '<p>The first-run password is printed once in the <b>trading-controller</b> container logs.</p>' : ''}
-      <form method="post" action="/login"><input type="password" name="password" autofocus><button>Log in</button></form></div></body></html>`;
+      <form method="post" action="/login"><input type="password" name="password" aria-label="Admin password" autocomplete="current-password" autofocus><button>Log in</button></form></div></body></html>`;
       }
 
       async function recoveryPage(session, address, secret) {
-        return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Save Wallet Recovery</title>
-      <style>body{font-family:system-ui;background:#101216;color:#eef2f7}.box{max-width:850px;margin:40px auto;background:#171b22;padding:24px;border-radius:14px}.secret{font-family:monospace;word-break:break-all;background:#0b0d10;padding:14px;border-radius:8px}.warn{background:#3b2510;padding:14px;border-radius:8px}button{padding:12px;border:0;border-radius:8px;font-weight:bold}</style></head>
+        return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Save Wallet Recovery · v$${APP_VERSION}</title>
+      <style>body{font-family:system-ui;background:#101216;color:#eef2f7}.box{max-width:850px;margin:40px auto;background:#171b22;padding:24px;border-radius:14px}.secret{font-family:monospace;word-break:break-all;background:#0b0d10;padding:14px;border-radius:8px}.warn{background:#3b2510;padding:14px;border-radius:8px}button{padding:12px;border:0;border-radius:8px;font-weight:bold}:focus-visible{outline:3px solid #79b8ff;outline-offset:3px}@media(max-width:700px){html{-webkit-text-size-adjust:100%}*{box-sizing:border-box}body{margin:0;padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(18px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}.box{width:100%;margin:0;padding:18px}.box h1{font-size:clamp(22px,7vw,30px);overflow-wrap:anywhere}.secret,.warn,p{overflow-wrap:anywhere}form input,form button{display:block;width:100%;min-width:0;min-height:48px;margin-top:10px;font-size:16px}a{display:inline-flex;align-items:center;min-height:44px}}@media(hover:none) and (pointer:coarse){form input,form button{min-height:48px;font-size:16px}}</style></head>
       <body><div class="box"><h1>🔐 Save this recovery key now</h1>
       <div class="warn"><b>This is shown once.</b> Store it in your password manager/offline backup. Never post it in n8n, Discord, GitHub or chat.<br><br><b>Security:</b> your current console uses HTTP on a trusted LAN. Do not create/view recovery keys over an untrusted network; use HTTPS/Tailscale before sharing this deployment remotely.</div>
       <p><b>Wallet address</b></p><div class="secret">$${html(address)}</div>
       <p><b>Solana private/recovery key (Base58)</b></p><div class="secret">$${html(secret)}</div>
       <p>Gateway has already imported the wallet and encrypted its stored copy. Trading Mode stays blocked until you confirm the backup.</p>
       <form method="post" action="/admin/wallet/backup-confirm">$${formHidden(session)}
-      <input type="hidden" name="address" value="$${html(address)}"><input name="confirm" placeholder="type I SAVED IT">
+      <input type="hidden" name="address" value="$${html(address)}"><input name="confirm" aria-label="Type I SAVED IT to confirm" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done" placeholder="type I SAVED IT">
       <button>I saved the recovery key</button></form>
       <p><a href="/">Back without confirming</a></p></div></body></html>`;
       }
@@ -1581,8 +1615,8 @@ services:
         });
         await run('Sample Jupiter quote',()=>gateway(`/connectors/jupiter/router/quote-swap?network=$${encodeURIComponent(NETWORK)}&baseToken=SOL&quoteToken=USDC&amount=0.001&side=SELL&slippagePct=$${encodeURIComponent(state.slippagePct)}`));
         const blocks=checks.map(c=>`<div class="diag $${c.ok?'ok':'fail'}"><h3>$${c.ok?'✅':'❌'} $${html(c.label)}</h3><pre>$${html(JSON.stringify(c.value,null,2))}</pre></div>`).join('');
-        return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gateway Diagnostics</title>
-      <style>body{font-family:system-ui;background:#0f1217;color:#edf2f7}.wrap{max-width:1050px;margin:30px auto;padding:0 16px}.diag{padding:14px;margin:12px 0;border-radius:12px;background:#171b22;border:1px solid #303846}.ok{border-color:#285e38}.fail{border-color:#7d3034}pre{white-space:pre-wrap;word-break:break-word;background:#0b0e12;padding:12px;border-radius:8px}a{color:#9dcbff}</style></head>
+        return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Gateway Diagnostics · v$${APP_VERSION}</title>
+      <style>body{font-family:system-ui;background:#0f1217;color:#edf2f7}.wrap{max-width:1050px;margin:30px auto;padding:0 16px}.diag{padding:14px;margin:12px 0;border-radius:12px;background:#171b22;border:1px solid #303846}.ok{border-color:#285e38}.fail{border-color:#7d3034}pre{white-space:pre-wrap;word-break:break-word;background:#0b0e12;padding:12px;border-radius:8px}a{color:#9dcbff}:focus-visible{outline:3px solid #79b8ff;outline-offset:3px}@media(max-width:700px){html{-webkit-text-size-adjust:100%}*{box-sizing:border-box}body{margin:0}.wrap{margin:12px auto;padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));padding-bottom:max(18px,env(safe-area-inset-bottom))}.wrap h1{font-size:clamp(23px,7vw,30px);overflow-wrap:anywhere}.diag{padding:12px}.diag h3,pre,p{overflow-wrap:anywhere}button{width:100%;min-height:48px;font-size:16px}a{display:inline-flex;align-items:center;min-height:44px}}@media(hover:none) and (pointer:coarse){button{min-height:48px;font-size:16px}}</style></head>
       <body><div class="wrap"><h1>🛠 Gateway Diagnostics</h1><p><a href="/">← Dashboard</a> &nbsp; <a href="/machine.json">Machine JSON</a></p>
       <p>This page runs only safe read-only health/status/list/quote checks. There is deliberately no arbitrary Gateway command console.</p>$${blocks}
       <form method="post" action="/admin/readiness">$${csrf}<button>Run full Quick Test Everything</button></form></div></body></html>`;

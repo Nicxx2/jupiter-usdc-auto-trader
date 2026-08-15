@@ -1,10 +1,10 @@
-# v10.2.3 implementation audit
+# v10.2.4 implementation audit
 
 Audit date: 2026-08-15
 
 The complete `docker-compose.yml` was inspected as the runtime source of truth, including the embedded Node controller, RPC configurator, Gateway and n8n supervisors, bootstrap shell, and decoded 52-node n8n workflow.
 
-This audit covers the first public release plus its v10.2.3 edge-case hardening. It verifies the execution controls, portable storage, Portainer lifecycle documentation, corrupt/partial-state fail-closed behavior, and automated release checks.
+This audit covers the first public release, its v10.2.3 edge-case hardening, and the v10.2.4 responsive interface. It verifies the execution controls, portable storage, Portainer lifecycle documentation, corrupt/partial-state fail-closed behavior, responsive safety presentation, and automated release checks.
 
 ## Confirmed runtime and safety behavior
 
@@ -103,4 +103,12 @@ RPC preflight calls the standard `getGenesisHash` method and requires the known 
 
 Repository verification confirms the transaction-path safeguards, while real execution also depends on each installation's wallet, RPC provider, token, route, and network conditions. The commissioning guide therefore starts in `TESTING` and calls for a deliberately tiny, verified first live trade before meaningful funds are introduced.
 
-The n8n payload remains the audited 52-node `JATCommunity1022` workflow with its existing SHA-256 because v10.2.3 changes the controller, configurator preflight, Compose lifecycle, tests, and docs rather than workflow behavior.
+## Responsive interface audit
+
+The desktop-first dashboard remains the baseline. Viewport-based CSS activates labelled card layouts for information-rich coin and trade tables at 1100 pixels and below, covering tablet landscape and other constrained screens; it then applies single-column spacing, touch-sized controls, safe-area insets, 16-pixel mobile form text, and bounded long-value wrapping below 700 pixels, with an additional compact-phone adjustment below 420 pixels. It does not inspect user-agent strings or maintain a separate mobile application.
+
+Each wallet selector, AUTO checkbox, mode control, and confirmation input exists only once in the document. Responsive presentation therefore cannot submit a hidden duplicate value or diverge from the desktop form. Exact mints, targets, topics, wallet assignments, trade states, and signatures remain visible. Login, one-time recovery, Gateway diagnostics, readiness, wallet, RPC, safety, and safety-lock forms receive the same mobile overflow, focus, keyboard, and touch-target safeguards.
+
+The dependency-free suite contains 43 behavior tests, including responsive invariants for breakpoints, labelled cards, single-copy trading controls, touch sizing, safe-area handling, mobile input hints, and the auxiliary pages. These checks complement manual browser/device inspection; they do not claim that a static test can reproduce every browser's rendering engine.
+
+The n8n payload remains the audited 52-node `JATCommunity1022` workflow with its existing SHA-256 because v10.2.3 changes the controller, configurator preflight, and Compose lifecycle while v10.2.4 changes responsive presentation, tests, and docs rather than workflow execution behavior.

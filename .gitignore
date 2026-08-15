@@ -65,6 +65,7 @@ Thumbs.db
 .idea/
 .vscode/
 /.codex/
+/.codex-remote-attachments/
 /.agents/
 .cache/
 node_modules/
