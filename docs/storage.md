@@ -28,6 +28,12 @@ The Compose supplies `jupiter-usdc-auto-trader` as a stable default project name
 
 Docker documents named volumes as its preferred persistence mechanism for container data because Docker manages them independently of a container's lifecycle and they are easier to back up or migrate than writable container layers. See Docker's [Volumes](https://docs.docker.com/engine/storage/volumes/) documentation.
 
+## History retention
+
+The `controller_data` volume survives normal container recreation and in-place stack updates. Its histories are deliberately bounded: the controller retains up to 1,000 audit rows and 500 durable trade records. The dashboard presents only the newest ten unique alert results and ten trade records to remain usable on mobile and desktop; authenticated machine diagnostics expose the latest 30 audit rows and 20 trade records. Those smaller views do not delete the remaining retained controller history.
+
+This is operational safety evidence, not an unlimited accounting archive. If longer retention is required, preserve secure periodic backups or export appropriately reviewed records through an operator-controlled process. Treat all exported history as sensitive because it may contain wallet addresses, balances, transaction signatures, RPC metadata, and timing information even though private keys and raw ntfy payloads are not part of the normal activity view.
+
 ## Rules that preserve an installation
 
 - Keep the Portainer **stack name** or Compose **project name** unchanged. Renaming the project creates/selects a different volume namespace and the application will look new even though the original volumes still exist.

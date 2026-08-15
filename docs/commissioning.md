@@ -23,8 +23,8 @@ Every installation depends on its own wallet, RPC provider, token, route, and ne
 2. Enable only the intended AUTO direction for the exact mint.
 3. Turn `MASTER` on only for the intentional test window.
 4. Trigger one normal Jupiter USDC Price Alerts notification.
-5. Confirm the decision is `WOULD_TRADE`, not merely that n8n or Gateway is healthy.
-6. Check that the reported direction, mint, source target, USDC scenario, effective price, impact, assigned wallet, and balances are the intended values.
+5. Open **Recent Alert Activity**, expand that alert, and confirm the decision is `WOULD_TRADE`, not merely that n8n or Gateway is healthy.
+6. Check that the reported direction, mint, source target, USDC scenario, effective price, impact, assigned wallet, and balances are the intended values. A TESTING result does not appear in **Recent Trades** because no transaction was submitted.
 7. Return `MASTER` off before making any configuration change.
 
 ## Submit one tiny live trade
@@ -36,7 +36,7 @@ Every installation depends on its own wallet, RPC provider, token, route, and ne
 5. Turn `MASTER` on separately.
 6. Trigger exactly one intentional normal source alert.
 7. Do not send duplicates and do not change source/controller configuration while it validates.
-8. Wait for a terminal controller result.
+8. Wait for a terminal controller result in **Recent Alert Activity**. If execution reached the durable transaction path, also inspect its **Recent Trades** record.
 
 ## Verify the result
 

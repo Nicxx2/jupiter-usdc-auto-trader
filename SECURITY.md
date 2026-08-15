@@ -20,7 +20,7 @@ If private vulnerability reporting is not enabled, contact the repository owner 
 
 ## Supported version
 
-Security fixes are targeted at the current `v10.2.5` one-Compose baseline unless a newer supported release is published. Infrastructure images are pinned by tag and immutable digest; version or digest upgrades need separate compatibility and commissioning tests.
+Security fixes are targeted at the current `v10.2.6` one-Compose baseline unless a newer supported release is published. Infrastructure images are pinned by tag and immutable digest; version or digest upgrades need separate compatibility and commissioning tests.
 
 ## Deployment security
 
@@ -33,9 +33,10 @@ Security fixes are targeted at the current `v10.2.5` one-Compose baseline unless
 - Keep the four installation secrets stable and backed up. Do not rotate them as a routine troubleshooting step.
 - Use a dedicated low-balance bot wallet and maintain a separate recovery backup.
 - Treat ntfy messages as untrusted triggers. Do not remove mint/topic/target/source validation.
+- Keep Recent Alert Activity observational only. It deliberately excludes raw ntfy payloads and private topic names; do not add a dashboard replay action or render unvalidated response fields.
 
 ## Incident response
 
 If a transaction result is ambiguous, do not retry. Leave `MASTER` off and the safety lock engaged while you inspect the signature, assigned wallet, and on-chain balances. If a secret or private key may have leaked, stop the stack, isolate the host, and move remaining funds using a known-clean wallet and environment.
 
-Do not post diagnostics publicly until they have been reviewed for addresses, RPC endpoints, transaction signatures, and other deployment metadata. The controller is designed to redact RPC secrets and exclude private keys, but operators should still review output before sharing it.
+Do not post screenshots, alert activity, trade history, or diagnostics publicly until they have been reviewed for addresses, balances, RPC endpoints, transaction signatures, and other deployment metadata. The controller is designed to redact RPC secrets and exclude private keys, but operators should still review output before sharing it.

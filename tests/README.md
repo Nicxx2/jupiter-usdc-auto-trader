@@ -18,6 +18,7 @@ The behavior suite currently protects:
 
 - strict environment booleans and source/ntfy URL boundaries;
 - responsive dashboard breakpoints, labelled mobile cards, grouped wallet/AUTO content, touch targets, safe-area handling, and single-copy trading controls;
+- bounded recent-alert capture, recognized terminal responses, retry/detail deduplication, stale-processing detection, allowlisted wallet/balance snapshots, safe result normalization, actionable guidance, and compact expandable alert/trade histories;
 - Solana mint, wallet, and signature shapes;
 - controller, authentication, trade, audit, replay, and trigger-guard persisted schemas;
 - n8n alert authorization, BUY/SELL quote math, repeated quote validation, and final safety evaluation;

@@ -34,7 +34,8 @@ test('complex dashboard tables become labelled cards without hiding safety data'
   assert.ok(dashboard.includes('class="mobile-cards coins-table"'));
   assert.ok(dashboard.includes('class="mobile-cards trades-table"'));
   assert.ok(dashboard.includes('aria-label="Coin automation controls"'));
-  assert.ok(dashboard.includes('aria-label="Recent trade history"'));
+  assert.ok(dashboard.includes('aria-label="Latest recent trades"'));
+  assert.ok(dashboard.includes('aria-label="Earlier recent trades"'));
   assert.ok(dashboard.includes('aria-label="Selected wallet balances"'));
 
   for (const label of [

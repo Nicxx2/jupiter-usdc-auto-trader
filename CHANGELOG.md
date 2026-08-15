@@ -2,6 +2,24 @@
 
 Notable release changes are recorded here. Versions follow semantic versioning: safety fixes and compatible deployment improvements increment the patch version; incompatible configuration or behavior changes require a larger increment and explicit migration guidance.
 
+## [10.2.6] - 2026-08-15
+
+### Alert outcome visibility and compact history
+
+- Added a collapsed **Recent Alert Activity** panel whose always-visible summary shows the latest alert time, token/direction, outcome, and reason.
+- Shows the latest three unique ntfy alert results when expanded, with up to seven additional results behind **Show more**, so desktop and mobile dashboards remain compact.
+- Added per-alert expandable details and deterministic **What to check** guidance for testing results, disabled controls, expected non-price alerts, stale/configuration changes, safety stops, balance/impact failures, confirmed trades, and uncertain outcomes.
+- Records structured, bounded decision details together with mode, MASTER, and exact-direction AUTO state captured at alert receipt, while keeping raw ntfy payloads, private topics, and unvalidated transaction links out of the normal dashboard.
+- Preserves validated wallet identity, recovery status, balance snapshot, reserve, trade cap, and impact cap when those fields are available, while rejecting wrong-type or malformed detail values.
+- Merges safe listener retries by bounded ntfy event ID, so a temporary handoff error and its later terminal decision appear as the same activity item rather than duplicate alerts.
+- Preserves richer terminal details across a later sparse legacy retry and prevents an unknown generic legacy row from downgrading a previously specific result.
+- Makes the durable idempotent trade record authoritative over any contradictory n8n response and rejects a claimed live-trade outcome that has no matching durable controller record. For a malformed, non-object, or unrecognized HTTP-200 response, an existing durable record supplies the result; otherwise the alert is recorded as `ABORTED`, marked seen, and never reconsidered automatically after controls change. If that recovered durable record were unexpectedly still `SUBMITTING` or `PENDING`, it is converted to `UNCERTAIN`, MASTER is disabled, and the safety lock is engaged. Network and non-success HTTP handoff failures retain the existing bounded safe-retry behavior.
+- Marks a receive-only activity item as an actionable interrupted-handoff warning after ten minutes without mutating replay or persistence state, avoiding a permanent misleading `PROCESSING` label after a restart.
+- Compactly shows the latest three live trade records and places records four through ten behind an explicit expander; the existing durable 500-record trade limit is unchanged.
+- Added eight alert-activity regression tests, bringing the dependency-free suite to 51 tests and covering field normalization, malformed values, recognized terminal decisions, durable-record requirements, invalid-response recovery, retry merging, terminal-result/detail precedence, stale processing, guidance, privacy, responsive presentation, and 3/10 history boundaries.
+
+The embedded 52-node `JATCommunity1022` workflow, execution routes and decisions, transaction safety checks, persistent collection schemas, authentication, wallets, volumes, and service topology are unchanged. This patch enriches the controller's existing bounded audit entries and improves dashboard observability without reprocessing an old alert or changing whether a transaction may execute.
+
 ## [10.2.5] - 2026-08-15
 
 ### Mobile automation card alignment

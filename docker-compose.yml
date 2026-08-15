@@ -219,7 +219,7 @@ services:
       const RPC_TOKEN_FILE = `$${RPC_CONTROL_DIR}/rpc-config-token`;
       const RPC_RESTART_ACK_FILE = `$${RPC_CONTROL_DIR}/restart.ack`;
       const NTFY = resolveNtfyServer(process.env.NTFY_SERVER || 'https://ntfy.sh');
-      const APP_VERSION = '10.2.5';
+      const APP_VERSION = '10.2.6';
       const NETWORK = process.env.SOLANA_NETWORK || 'mainnet-beta';
       const TOPIC_REFRESH_MS = Number(process.env.TOPIC_REFRESH_SECONDS || 15) * 1000;
       const LOOKBACK = process.env.NTFY_LOOKBACK || '5m';
@@ -352,6 +352,279 @@ services:
       function isSolanaSignature(v) { return /^[1-9A-HJ-NP-Za-km-z]{64,100}$$/.test(String(v || '')); }
       function isPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
       function hasOwn(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
+      const ACTIVITY_DECISIONS = new Set([
+        'PROCESSING','PROCESSING_ERROR','PROCESSED','IGNORED','ABORTED','WOULD_TRADE',
+        'TRADE_CONFIRMED','TRADE_FAILED','TRADE_UNCERTAIN','BURST_SUPPRESSED','TRIGGER_GUARD_SUPPRESSED','TRADE_RESULT',
+      ]);
+      const TERMINAL_ACTIVITY_DECISIONS = new Set([
+        'PROCESSED','IGNORED','ABORTED','WOULD_TRADE','TRADE_CONFIRMED','TRADE_FAILED',
+        'TRADE_UNCERTAIN','BURST_SUPPRESSED','TRIGGER_GUARD_SUPPRESSED','TRADE_RESULT',
+      ]);
+      const TERMINAL_ACTIVITY_INPUTS = new Set([
+        ...[...TERMINAL_ACTIVITY_DECISIONS].filter(value=>value!=='PROCESSED'),
+        'CONFIRMED','FAILED','PENDING','UNCERTAIN','REVIEWED',
+      ]);
+      function activityText(value, max=600) {
+        if (!['string','number','boolean'].includes(typeof value)) return null;
+        const normalized=String(value).replace(/\s+/g,' ').trim();
+        return normalized ? normalized.slice(0,max) : null;
+      }
+      function activityEventId(value) {
+        return typeof value==='string'&&value.trim().length>0&&value.length<=128?value:null;
+      }
+      function activityNumber(value, positive=false) {
+        return typeof value==='number' && Number.isFinite(value) && (positive ? value>0 : value>=0) ? value : null;
+      }
+      function normalizeActivityDecision(value) {
+        const raw=String(value||'').trim().toUpperCase();
+        const mapped=raw==='CONFIRMED'?'TRADE_CONFIRMED':raw==='FAILED'?'TRADE_FAILED':
+          ['PENDING','UNCERTAIN','REVIEWED'].includes(raw)?'TRADE_UNCERTAIN':raw;
+        return ACTIVITY_DECISIONS.has(mapped) ? mapped : 'PROCESSED';
+      }
+      function terminalActivityDecision(value) {
+        const raw=String(value||'').trim().toUpperCase();
+        if(!TERMINAL_ACTIVITY_INPUTS.has(raw))return null;
+        const normalized=normalizeActivityDecision(raw);
+        return TERMINAL_ACTIVITY_DECISIONS.has(normalized)?normalized:null;
+      }
+      function activityDecisionForDurableTrade(trade) {
+        const status=String(trade?.status||'').trim().toUpperCase();
+        if(status==='CONFIRMED')return 'TRADE_CONFIRMED';
+        if(status==='FAILED')return 'TRADE_FAILED';
+        if(['SUBMITTING','PENDING','UNCERTAIN'].includes(status))return 'TRADE_UNCERTAIN';
+        return 'TRADE_RESULT';
+      }
+      function resolveN8nTerminalResponse(result, existingTrade=null, responseProblem=null) {
+        let problem=activityText(responseProblem,200);
+        if(!problem&&!isPlainObject(result))problem='n8n returned a non-object response';
+        let terminalDecision=problem?null:
+          terminalActivityDecision(result.decision??result.trade?.status??result.status);
+        if(!problem&&!terminalDecision)problem='n8n returned an unrecognized response';
+        if(isPlainObject(existingTrade)){
+          const durableDecision=activityDecisionForDurableTrade(existingTrade);
+          if(!problem&&terminalDecision!==durableDecision)
+            problem='n8n response conflicted with the durable trade result';
+          terminalDecision=durableDecision;
+          return {
+            result:{decision:terminalDecision,mode:'TRADING',trade:existingTrade,
+              activityNote:problem?`$${problem}; the durable trade record was used`:null},
+            terminalDecision,responseProblem:problem,recoveredFromTrade:true,
+          };
+        }
+        if(!problem&&['TRADE_CONFIRMED','TRADE_FAILED','TRADE_UNCERTAIN','TRADE_RESULT'].includes(terminalDecision))
+          problem='n8n reported a trade result without a durable controller record';
+        if(!problem)return {result,terminalDecision,responseProblem:null,recoveredFromTrade:false};
+        terminalDecision='ABORTED';
+        return {
+          result:{decision:terminalDecision,
+            reason:`$${problem}; this alert was stopped and will not be replayed automatically`,
+            execution:'NONE'},
+          terminalDecision,responseProblem:problem,recoveredFromTrade:false,
+        };
+      }
+      function normalizeActivityMode(value) {
+        const mode=String(value||'').trim().toUpperCase();
+        return ['TESTING','TRADING'].includes(mode) ? mode : null;
+      }
+      function defaultActivityReason(decision) {
+        const reasons={
+          PROCESSING:'The alert is currently being validated.',
+          PROCESSING_ERROR:'The internal workflow handoff failed before a terminal decision; the listener will retry safely.',
+          PROCESSED:'The alert was processed, but this older result did not retain a detailed outcome.',
+          IGNORED:'The alert did not pass initial authorization.',
+          ABORTED:'A fresh validation or safety check stopped execution before submission.',
+          WOULD_TRADE:'All available checks passed, but TESTING mode blocked transaction submission.',
+          TRADE_CONFIRMED:'The transaction was confirmed on Solana.',
+          TRADE_FAILED:'The transaction attempt failed conclusively.',
+          TRADE_UNCERTAIN:'The transaction outcome requires human review before any retry.',
+          BURST_SUPPRESSED:'Another trade for this token and direction was already attempted inside the burst window.',
+          TRIGGER_GUARD_SUPPRESSED:'This exact threshold is already protected by a replay guard.',
+          TRADE_RESULT:'The transaction path returned an unclassified terminal result.',
+        };
+        return reasons[decision]||reasons.PROCESSED;
+      }
+      function activityDecisionRecord(msg, result, rawDecision, controllerState=state) {
+        const body=isPlainObject(result)?result:{};
+        const trade=isPlainObject(body.trade)?body.trade:{};
+        const decision=normalizeActivityDecision(rawDecision||body.decision||trade.status||body.status);
+        const mintCandidate=body.mint??trade.mint;
+        const mint=isMint(mintCandidate)?String(mintCandidate):null;
+        const directionCandidate=String(body.direction??trade.direction??'').toUpperCase();
+        const direction=['BUY','SELL'].includes(directionCandidate)?directionCandidate:null;
+        const control=mint&&isPlainObject(controllerState?.tokens?.[mint])?controllerState.tokens[mint]:null;
+        const configuredAuto=direction==='BUY'?control?.autoBuy===true:direction==='SELL'?control?.autoSell===true:null;
+        const autoEnabled=typeof body.autoEnabled==='boolean'?body.autoEnabled:configuredAuto;
+        const signatureCandidate=body.signature??trade.signature;
+        const balances=isPlainObject(body.balances)?body.balances:{};
+        const walletCandidate=body.assignedWallet??trade.wallet??balances.wallet;
+        const wallet=isMint(walletCandidate)?String(walletCandidate):null;
+        return {
+          id:activityEventId(msg?.id),
+          topic:activityText(msg?.topic,160),
+          title:activityText(msg?.title,200),
+          decision,
+          reason:activityText(body.reason??trade.reason??trade.error,600)||defaultActivityReason(decision),
+          token:activityText(body.token??body.name??trade.name,80),
+          mint,
+          direction,
+          target:activityNumber(body.target??trade.target,true),
+          usdAmount:activityNumber(body.usdAmount??trade.usdAmount,true),
+          mode:normalizeActivityMode(body.mode)||normalizeActivityMode(controllerState?.mode),
+          master:typeof body.master==='boolean'?body.master:
+            typeof controllerState?.master==='boolean'?controllerState.master:null,
+          autoEnabled,
+          finalPrice:activityNumber(body.finalPrice??trade.effectivePrice,true),
+          amountIn:activityNumber(body.amountIn??trade.amountIn??
+            (direction==='BUY'?trade.usdAmount:direction==='SELL'?trade.tokenAmount:null),true),
+          amountOut:activityNumber(body.amountOut??trade.amountOut,true),
+          priceImpactPercent:activityNumber(body.priceImpactPercent??trade.priceImpactPercent),
+          maxPriceImpactPct:activityNumber(body.maxPriceImpactPct??trade.maxPriceImpactPct??controllerState?.maxPriceImpactPct),
+          maxTradeUSDC:activityNumber(body.maxTradeUSDC??controllerState?.maxTradeUSDC,true),
+          wallet,
+          walletNickname:activityText(body.walletNickname??trade.walletNickname??balances.walletNickname,80),
+          walletBackupConfirmed:wallet&&typeof balances.backupConfirmed==='boolean'?balances.backupConfirmed:null,
+          balanceSol:activityNumber(balances.sol),
+          balanceUsdc:activityNumber(balances.usdc),
+          balanceToken:activityNumber(balances.token),
+          minSolReserve:activityNumber(balances.minSolReserve??controllerState?.minSolReserve),
+          signature:isSolanaSignature(signatureCandidate)?String(signatureCandidate):null,
+          execution:activityText(body.execution,100),
+          note:activityText(body.activityNote,240),
+        };
+      }
+      function activityGuidance(item) {
+        const decision=normalizeActivityDecision(item?.decision);
+        const reason=String(item?.reason||'').toLowerCase();
+        if(decision==='TRADE_CONFIRMED')return 'Verify the signature and expected wallet balance changes before increasing trade size.';
+        if(decision==='TRADE_UNCERTAIN')return 'Do not retry. Leave the safety lock engaged and inspect the signature and wallet on-chain first.';
+        if(decision==='TRADE_FAILED')return 'Review Gateway Diagnostics, the assigned wallet and on-chain state before deliberately resetting any threshold guard.';
+        if(decision==='WOULD_TRADE')return 'This is the expected dry-run result. Enable TRADING only after commissioning checks are complete.';
+        if(decision==='PROCESSING')return 'Refresh shortly. Do not send a duplicate alert while validation is still in progress.';
+        if(decision==='PROCESSING_ERROR')return 'Run Quick Test Everything and check source, n8n and Gateway connectivity. The listener retries pre-terminal delivery safely.';
+        if(decision==='TRIGGER_GUARD_SUPPRESSED'||reason.includes('threshold')&&reason.includes('guard'))
+          return 'This is replay protection. Reset the guard only after reviewing the earlier attempt and intentionally re-arming the source alert.';
+        if(decision==='BURST_SUPPRESSED'||reason.includes('burst'))
+          return 'This is expected burst protection; no manual retry is needed.';
+        if(reason.includes('not a normal')||reason.includes('rsi')||reason.includes('action readiness'))
+          return 'This is expected. Only fresh normal BUY/SELL price alerts can enter the automated execution path.';
+        if(reason.includes('master')&&reason.includes('off'))
+          return 'Turn MASTER on only when you deliberately want a new eligible alert to execute; this old alert will not be replayed.';
+        if(reason.includes('testing'))
+          return 'No transaction was submitted. Complete the dry run before deliberately enabling TRADING.';
+        if(reason.includes('auto buy')||reason.includes('auto sell')||reason.includes('automation'))
+          return 'Review the coin AUTO control, save it, then deliberately re-enable TRADING and MASTER before waiting for a new alert.';
+        if(reason.includes('stale')||reason.includes('fresh'))
+          return 'Wait for a new source alert. Do not replay an old notification.';
+        if(reason.includes('balance')||reason.includes('reserve')||reason.includes('insufficient'))
+          return 'Check the assigned wallet, complete scenario amount and SOL reserve. The trader will not silently reduce the trade size.';
+        if(reason.includes('impact'))
+          return 'The quote exceeded the configured impact cap. Consider a smaller source scenario or wait for better liquidity.';
+        if(reason.includes('target')||reason.includes('price is')||reason.includes('no longer meets'))
+          return 'The fresh quote or source target no longer qualified. Wait for a new alert rather than forcing execution.';
+        if(reason.includes('wallet')||reason.includes('backup'))
+          return 'Review the exact-mint wallet assignment and recovery-backup confirmation before re-arming.';
+        if(reason.includes('topic')||reason.includes('configuration')||reason.includes('scenario changed'))
+          return 'Review the current source configuration and topic, then wait for a new alert after saving any correction.';
+        if(decision==='IGNORED')return 'Review the reason above. Ignored alerts are intentionally not replayed after controls are changed.';
+        if(decision==='ABORTED')return 'A safety check stopped submission. Correct the cause, then wait for a new alert instead of replaying this one.';
+        return 'Review the reason and run Quick Test Everything if the outcome was not expected.';
+      }
+      function activityTone(decision) {
+        const normalized=normalizeActivityDecision(decision);
+        if(normalized==='TRADE_CONFIRMED')return 'success';
+        if(normalized==='WOULD_TRADE'||normalized==='PROCESSING')return 'testing';
+        if(['TRADE_FAILED','TRADE_UNCERTAIN','PROCESSING_ERROR'].includes(normalized))return 'danger';
+        if(['ABORTED','TRADE_RESULT'].includes(normalized))return 'warning';
+        return 'neutral';
+      }
+      function activityStatusLabel(decision) {
+        return normalizeActivityDecision(decision).replaceAll('_',' ');
+      }
+      function mergeRecentAlertActivity(rows, limit=10, nowMs=Date.now()) {
+        const byId=new Map();
+        for(const row of Array.isArray(rows)?rows:[]){
+          if(!isPlainObject(row)||!['NTFY_RECEIVED','NTFY_PROCESSING_ERROR','NTFY_DECISION'].includes(row.kind))continue;
+          const id=activityEventId(row.id);
+          if(!id)continue;
+          const prior=byId.get(id)||null;
+          if(row.kind==='NTFY_RECEIVED'){
+            if(prior&&TERMINAL_ACTIVITY_DECISIONS.has(prior.decision))continue;
+            byId.set(id,{
+              ...(prior||{}),id,
+              receivedAt:prior?.receivedAt||row.at,
+              updatedAt:row.at,
+              title:activityText(row.title,200)||prior?.title||null,
+              topic:activityText(row.topic,160)||prior?.topic||null,
+              decision:'PROCESSING',reason:defaultActivityReason('PROCESSING'),
+            });
+            continue;
+          }
+          if(row.kind==='NTFY_PROCESSING_ERROR'){
+            if(prior&&TERMINAL_ACTIVITY_DECISIONS.has(prior.decision))continue;
+            byId.set(id,{
+              ...(prior||{}),id,
+              receivedAt:prior?.receivedAt||row.at,
+              updatedAt:row.at,
+              decision:'PROCESSING_ERROR',
+              reason:activityText(row.publicReason,600)||defaultActivityReason('PROCESSING_ERROR'),
+            });
+            continue;
+          }
+          const decision=normalizeActivityDecision(row.decision);
+          if(prior&&prior.decision!=='PROCESSED'&&decision==='PROCESSED')continue;
+          const mint=isMint(row.mint)?String(row.mint):null;
+          const signature=isSolanaSignature(row.signature)?String(row.signature):null;
+          const numberOrPrior=(value,key,positive=false)=>{
+            const parsed=activityNumber(value,positive);
+            return parsed===null?(prior?.[key]??null):parsed;
+          };
+          byId.set(id,{
+            ...(prior||{}),id,
+            receivedAt:prior?.receivedAt||row.at,
+            updatedAt:row.at,
+            title:activityText(row.title,200)||prior?.title||null,
+            topic:activityText(row.topic,160)||prior?.topic||null,
+            decision,
+            reason:activityText(row.reason,600)||
+              (prior?.decision===decision?prior.reason:null)||defaultActivityReason(decision),
+            token:activityText(row.token,80)||prior?.token||null,
+            mint:mint||prior?.mint||null,
+            direction:['BUY','SELL'].includes(row.direction)?row.direction:prior?.direction||null,
+            target:numberOrPrior(row.target,'target',true),
+            usdAmount:numberOrPrior(row.usdAmount,'usdAmount',true),
+            mode:normalizeActivityMode(row.mode)||prior?.mode||null,
+            master:typeof row.master==='boolean'?row.master:prior?.master??null,
+            autoEnabled:typeof row.autoEnabled==='boolean'?row.autoEnabled:prior?.autoEnabled??null,
+            finalPrice:numberOrPrior(row.finalPrice,'finalPrice',true),
+            amountIn:numberOrPrior(row.amountIn,'amountIn',true),
+            amountOut:numberOrPrior(row.amountOut,'amountOut',true),
+            priceImpactPercent:numberOrPrior(row.priceImpactPercent,'priceImpactPercent'),
+            maxPriceImpactPct:numberOrPrior(row.maxPriceImpactPct,'maxPriceImpactPct'),
+            maxTradeUSDC:numberOrPrior(row.maxTradeUSDC,'maxTradeUSDC',true),
+            wallet:isMint(row.wallet)?String(row.wallet):prior?.wallet||null,
+            walletNickname:activityText(row.walletNickname,80)||prior?.walletNickname||null,
+            walletBackupConfirmed:typeof row.walletBackupConfirmed==='boolean'?
+              row.walletBackupConfirmed:prior?.walletBackupConfirmed??null,
+            balanceSol:numberOrPrior(row.balanceSol,'balanceSol'),
+            balanceUsdc:numberOrPrior(row.balanceUsdc,'balanceUsdc'),
+            balanceToken:numberOrPrior(row.balanceToken,'balanceToken'),
+            minSolReserve:numberOrPrior(row.minSolReserve,'minSolReserve'),
+            signature:signature||prior?.signature||null,
+            execution:activityText(row.execution,100)||prior?.execution||null,
+            note:activityText(row.note,240)||prior?.note||null,
+          });
+        }
+        const bounded=Math.min(50,Math.max(1,Number.isInteger(Number(limit))?Number(limit):10));
+        const referenceTime=typeof nowMs==='number'&&Number.isFinite(nowMs)?nowMs:Date.now();
+        return [...byId.values()].map(item=>{
+          const updated=Date.parse(item.updatedAt||'');
+          if(item.decision==='PROCESSING'&&Number.isFinite(updated)&&referenceTime-updated>10*60*1000){
+            return {...item,decision:'PROCESSING_ERROR',
+              reason:'No terminal decision was recorded within 10 minutes; the controller may have restarted or the internal handoff may be unavailable.'};
+          }
+          return item;
+        }).sort((a,b)=>Date.parse(b.updatedAt||0)-Date.parse(a.updatedAt||0)).slice(0,bounded);
+      }
       function persistedSchemaError(path, detail) {
         throw new Error(`Persisted controller state $${path} $${detail}; restore a known-good controller_data backup`);
       }
@@ -1278,9 +1551,101 @@ services:
           `<div class="check"><span>$${c.ok ? '✅' : '❌'} $${html(c.label)}</span><small>$${html(c.detail)}</small></div>`
         ).join('') : '<p class="muted">Run Quick Test Everything to populate readiness.</p>';
 
-        const tradesHtml = trades.slice(-10).reverse().map(t =>
-          `<tr><td data-label="Time">$${html(t.at || t.updatedAt)}</td><td data-label="Token">$${html(t.name)}</td><td data-label="Side">$${html(t.direction)}</td><td data-label="Status">$${html(t.status)}</td><td data-label="Impact">$${Number.isFinite(Number(t.priceImpactPercent))?html(Number(t.priceImpactPercent).toFixed(2)+'%'):'—'}</td><td data-label="Signature" class="mint">$${html(t.signature || '—')}</td></tr>`
-        ).join('') || '<tr class="empty-row"><td colspan="6"><div class="empty">No live trades yet.</div></td></tr>';
+        const tradeRowHtml = t =>
+          `<tr><td data-label="Time">$${html(t.at || t.updatedAt)}</td><td data-label="Token">$${html(t.name)}</td><td data-label="Side">$${html(t.direction)}</td><td data-label="Status">$${html(t.status)}</td><td data-label="Impact">$${Number.isFinite(Number(t.priceImpactPercent))?html(Number(t.priceImpactPercent).toFixed(2)+'%'):'—'}</td><td data-label="Signature" class="mint">$${html(t.signature || '—')}</td></tr>`;
+        const recentTradeRows=trades.slice(-10).reverse();
+        const visibleTradeRows=recentTradeRows.slice(0,3);
+        const olderTradeRows=recentTradeRows.slice(3);
+        const recentTradesSummary=recentTradeRows.length?
+          `Latest $${visibleTradeRows.length} of $${recentTradeRows.length}`:'No live trades yet';
+        const visibleTradesHtml=visibleTradeRows.map(tradeRowHtml).join('') ||
+          '<tr class="empty-row"><td colspan="6"><div class="empty">No live trades yet.</div></td></tr>';
+        const olderTradesHtml=olderTradeRows.map(tradeRowHtml).join('');
+
+        const activityTime = value => {
+          const stamp=Date.parse(value||'');
+          if(!Number.isFinite(stamp))return 'Unknown time';
+          return new Date(stamp).toISOString().replace('T',' ').slice(0,19)+' UTC';
+        };
+        const compactActivityText = (value,max=150) => {
+          const text=activityText(value,max+1)||'';
+          return text.length>max?text.slice(0,max-1)+'…':text;
+        };
+        const activityIdentity = item => {
+          const name=activityText(item?.token,80)||activityText(item?.title,80)||'Alert';
+          return item?.direction?`$${name} · $${item.direction}`:name;
+        };
+        const activityDetailField = (label,value,extraClass='') => value===null||value===undefined||value===''?'':
+          `<div class="activity-field"><dt>$${html(label)}</dt><dd class="$${html(extraClass)}">$${value}</dd></div>`;
+        const activityItemHtml = item => {
+          const decision=normalizeActivityDecision(item.decision);
+          const label=activityStatusLabel(decision);
+          const tone=activityTone(decision);
+          const reason=activityText(item.reason,600)||defaultActivityReason(decision);
+          const identity=activityIdentity(item);
+          const tokenUnit=activityText(item.token,80)||'token';
+          const inputUnit=item.direction==='BUY'?'USDC':tokenUnit;
+          const outputUnit=item.direction==='BUY'?tokenUnit:item.direction==='SELL'?'USDC':null;
+          const signatureHtml=item.signature?
+            `<a class="mint" href="https://explorer.solana.com/tx/$${encodeURIComponent(item.signature)}" target="_blank" rel="noopener noreferrer">$${html(item.signature)} ↗</a>`:null;
+          const fields=[
+            activityDetailField('Received',html(activityTime(item.receivedAt))),
+            item.updatedAt!==item.receivedAt?activityDetailField('Decision time',html(activityTime(item.updatedAt))):'',
+            activityDetailField('Alert title',item.title?html(item.title):null),
+            activityDetailField('Alert ID',item.id?html(item.id):null,'mint'),
+            activityDetailField('Token',item.token?html(item.token):null),
+            activityDetailField('Exact mint',item.mint?html(item.mint):null,'mint'),
+            activityDetailField('Direction',item.direction?html(item.direction):null),
+            activityDetailField('Target',item.target!==null&&item.target!==undefined?html(formatPrice(item.target)):null),
+            activityDetailField('USDC scenario',item.usdAmount!==null&&item.usdAmount!==undefined?html(formatBalance(item.usdAmount,6)+' USDC'):null),
+            activityDetailField('Mode at receipt',item.mode?html(item.mode):null),
+            activityDetailField('MASTER at receipt',typeof item.master==='boolean'?html(item.master?'ON':'OFF'):null),
+            activityDetailField('AUTO direction at receipt',typeof item.autoEnabled==='boolean'?html(item.autoEnabled?'Enabled':'Disabled'):null),
+            activityDetailField('Wallet name',item.walletNickname?html(item.walletNickname):null),
+            activityDetailField('Assigned wallet',item.wallet?html(item.wallet):null,'mint'),
+            activityDetailField('Recovery backup',typeof item.walletBackupConfirmed==='boolean'?
+              html(item.walletBackupConfirmed?'Confirmed':'Not confirmed'):null),
+            activityDetailField('Wallet SOL',item.balanceSol!==null&&item.balanceSol!==undefined?
+              html(formatBalance(item.balanceSol,9)+' SOL'):null),
+            activityDetailField('Wallet USDC',item.balanceUsdc!==null&&item.balanceUsdc!==undefined?
+              html(formatBalance(item.balanceUsdc,6)+' USDC'):null),
+            activityDetailField('Wallet token',item.balanceToken!==null&&item.balanceToken!==undefined?
+              html(formatBalance(item.balanceToken,9)+' '+tokenUnit):null),
+            activityDetailField('Minimum SOL reserve',item.minSolReserve!==null&&item.minSolReserve!==undefined?
+              html(formatBalance(item.minSolReserve,9)+' SOL'):null),
+            activityDetailField('Maximum trade',item.maxTradeUSDC!==null&&item.maxTradeUSDC!==undefined?
+              html(formatBalance(item.maxTradeUSDC,6)+' USDC'):null),
+            activityDetailField('Impact cap',item.maxPriceImpactPct!==null&&item.maxPriceImpactPct!==undefined?
+              html(Number(item.maxPriceImpactPct).toFixed(2)+'%'):null),
+            activityDetailField('Final price',item.finalPrice!==null&&item.finalPrice!==undefined?html(formatPrice(item.finalPrice)+' USDC'):null),
+            activityDetailField('Input amount',item.amountIn!==null&&item.amountIn!==undefined?html(formatBalance(item.amountIn,9)+' '+inputUnit):null),
+            activityDetailField('Output amount',item.amountOut!==null&&item.amountOut!==undefined&&outputUnit?html(formatBalance(item.amountOut,9)+' '+outputUnit):null),
+            activityDetailField('Price impact',item.priceImpactPercent!==null&&item.priceImpactPercent!==undefined?html(Number(item.priceImpactPercent).toFixed(2)+'%'):null),
+            activityDetailField('Execution',item.execution?html(item.execution):null),
+            activityDetailField('Internal response note',item.note?html(item.note):null),
+            activityDetailField('Signature',signatureHtml,'activity-signature'),
+          ].filter(Boolean).join('');
+          return `<details class="activity-item tone-$${tone}">
+            <summary>
+              <span class="activity-heading"><b>$${html(identity)}</b><small>$${html(activityTime(item.updatedAt))}</small></span>
+              <span class="activity-outcome"><span class="activity-badge">$${html(label)}</span><span class="activity-reason">$${html(compactActivityText(reason))}</span></span>
+            </summary>
+            <div class="activity-details">
+              <p><b>Reason:</b> $${html(reason)}</p>
+              <p class="activity-guidance"><b>What to check:</b> $${html(activityGuidance(item))}</p>
+              $${fields?`<dl class="activity-grid">$${fields}</dl>`:''}
+            </div>
+          </details>`;
+        };
+        const alertActivity=mergeRecentAlertActivity(audit,10);
+        const latestActivity=alertActivity[0]||null;
+        const latestActivitySummary=latestActivity?
+          `$${activityTime(latestActivity.updatedAt)} · $${activityIdentity(latestActivity)} · $${activityStatusLabel(latestActivity.decision)} — $${compactActivityText(latestActivity.reason,110)}`:
+          'No alerts processed yet';
+        const visibleActivityHtml=alertActivity.slice(0,3).map(activityItemHtml).join('')||
+          '<div class="empty">No ntfy alerts have been processed yet.</div>';
+        const olderActivity=alertActivity.slice(3);
+        const olderActivityHtml=olderActivity.map(activityItemHtml).join('');
 
         const warning = auth.mustChange ? `<div class="banner bad">Change the first-run admin password before Trading Mode can be enabled.</div>` : '';
         const lock = state.safetyLock ? `<div class="banner bad"><b>SAFETY LOCK:</b> $${html(state.safetyReason || 'An uncertain transaction requires review.')}</div>` : '';
@@ -1309,6 +1674,26 @@ services:
       .statusrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.chip{font-size:12px;padding:5px 8px;border-radius:999px;background:#222934;border:1px solid #333d4b;color:#c6d0db}.chip.ok{background:#10291a;border-color:#285e38}.chip.warnchip{background:#332814;border-color:#725b28}
       .hero{padding:16px 18px}.hero h2{margin:0 0 8px}.compactline{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.sectiontitle{margin:22px 2px 8px;color:#9aa7b7;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
       .empty{padding:20px;text-align:center;color:#91a0b2}.breakable{overflow-wrap:anywhere;word-break:break-word}.cell-value{min-width:0}.wallet-control select{max-width:100%}.assignment-status{margin-top:5px;overflow-wrap:anywhere}.automation-controls{display:grid;gap:6px}.automation-option{min-width:0}.automation-note{display:block;margin:2px 0 0 28px}.toggle-line{display:inline-flex;align-items:center;gap:6px}
+      details.more-results{margin-top:12px;border-top:1px solid #29303a;padding-top:4px}
+      details.more-results>summary{cursor:pointer;color:#b8c6d6;font-weight:700;padding:11px 4px;overflow-wrap:anywhere}
+      details.more-results[open]>summary{margin-bottom:8px}
+      details.activity-panel>summary{align-items:flex-start}.activity-summarymeta{max-width:72%;line-height:1.45;overflow-wrap:anywhere}
+      .activity-list{display:grid;gap:10px}.activity-item{border:1px solid #303846;border-left-width:4px;border-radius:11px;background:#12161c;overflow:hidden}
+      .activity-item>summary{list-style:none;cursor:pointer;padding:12px 14px;display:grid;grid-template-columns:minmax(150px,.65fr) minmax(0,1.35fr);gap:14px;align-items:start}
+      .activity-item>summary::-webkit-details-marker{display:none}.activity-item>summary:after{content:'＋';color:#8fa1b5;position:absolute;right:12px;top:10px}
+      .activity-item>summary{position:relative;padding-right:38px}.activity-item[open]>summary:after{content:'−'}
+      .activity-heading,.activity-outcome{display:grid;gap:4px;min-width:0}.activity-heading small{color:#94a3b5;font-weight:500}.activity-outcome{justify-items:start}
+      .activity-badge{display:inline-block;font-size:11px;font-weight:800;letter-spacing:.03em;padding:4px 7px;border:1px solid #3c4654;border-radius:999px;background:#252c36;color:#d3dbe5}
+      .activity-reason{color:#b4c0ce;overflow-wrap:anywhere}.activity-details{padding:14px;border-top:1px solid #29303a}.activity-details>p:first-child{margin-top:0}
+      .activity-guidance{background:#17212c;border:1px solid #34465a;border-radius:9px;padding:10px 12px}
+      .activity-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px;margin:12px 0 0}
+      .activity-field{display:grid;grid-template-columns:minmax(125px,38%) minmax(0,1fr);gap:10px;padding:8px 0;border-bottom:1px solid #29303a;min-width:0}
+      .activity-field dt{color:#a8b4c3;font-size:12px;font-weight:700;text-transform:uppercase}.activity-field dd{margin:0;min-width:0;overflow-wrap:anywhere}.activity-signature{word-break:break-all}
+      .tone-success{border-left-color:#3a8f55}.tone-success .activity-badge{background:#10291a;border-color:#285e38;color:#9bf3b7}
+      .tone-testing{border-left-color:#527fa8}.tone-testing .activity-badge{background:#142536;border-color:#315777;color:#a9d6ff}
+      .tone-warning{border-left-color:#a57d31}.tone-warning .activity-badge{background:#332814;border-color:#725b28;color:#f3d48a}
+      .tone-danger{border-left-color:#a74349}.tone-danger .activity-badge{background:#351718;border-color:#7d3034;color:#ffafb3}
+      .tone-neutral{border-left-color:#596777}
       :focus-visible{outline:3px solid #79b8ff;outline-offset:3px}
       @media(max-width:1100px){
         table.mobile-cards,table.mobile-cards *{box-sizing:border-box}
@@ -1331,11 +1716,12 @@ services:
         .top{gap:10px}.top h1{font-size:clamp(22px,7vw,28px);line-height:1.2;margin:8px 0}.version{margin-left:5px;font-size:11px}.top>div{min-width:0;max-width:100%}.top-links a{display:inline-flex;align-items:center;min-height:44px}
         .grid{grid-template-columns:minmax(0,1fr);gap:10px}.card,.hero{padding:14px;margin:10px 0}.compactline{align-items:stretch}.compactline>div,.compactline>form{width:100%;min-width:0;text-align:left!important}
         .hero form input:not([type="hidden"]),.hero form button{display:block;width:100%;min-width:0;min-height:44px;margin-top:8px;font-size:16px}
-        details.panel{margin:10px 0}.panelbody{padding:14px}.summarymeta{display:none}details.panel>summary{min-height:48px;padding:13px 14px;gap:10px}
+        details.panel{margin:10px 0}.panelbody{padding:14px}.summarymeta{display:none}.activity-summarymeta{display:block;max-width:none;width:100%;margin:4px 0 0;text-align:left}details.activity-panel>summary{display:grid;grid-template-columns:minmax(0,1fr) auto}details.activity-panel>summary .activity-summarymeta{grid-column:1/-1;padding-right:24px}details.panel>summary{min-height:48px;padding:13px 14px;gap:10px}
         .check{display:block}.check small{display:block;text-align:left;margin:4px 0 0 0;overflow-wrap:anywhere}.statusrow{gap:6px}.chip{font-size:11px}
         .walletgrid{grid-template-columns:minmax(0,1fr)}.walletcard{min-width:0;overflow-wrap:anywhere}.pill{display:inline-block;margin:5px 0 0 0}
         .panelbody form input:not([type="hidden"]):not([type="checkbox"]),.panelbody form select,.panelbody form button,.card form input:not([type="hidden"]):not([type="checkbox"]),.card form select,.card form button{display:block;width:100%;max-width:100%;min-width:0!important;min-height:44px;margin-left:0!important;margin-top:8px;font-size:16px}
         .panelbody form input[type="checkbox"],.card form input[type="checkbox"]{width:22px;height:22px;min-height:22px;flex:0 0 auto}.panelbody .toggle-line,.card .toggle-line{min-height:44px}.panelbody details>summary{display:flex;align-items:center;min-height:44px}
+        .activity-item>summary{display:grid!important;grid-template-columns:minmax(0,1fr);gap:9px;align-items:start!important;min-height:58px!important}.activity-outcome{padding-right:4px}.activity-grid{grid-template-columns:minmax(0,1fr)}.activity-field{grid-template-columns:minmax(105px,35%) minmax(0,1fr)}details.more-results>summary{min-height:48px;display:flex;align-items:center}
         h1,h2,h3,p,.banner,.muted{overflow-wrap:anywhere}.sectiontitle{margin-top:18px}.empty{padding:14px}
       }
       @media(max-width:420px){
@@ -1411,10 +1797,29 @@ services:
       <div style="margin-top:14px"><button class="primary">Save coin controls</button></div></form>
       </div>
 
+      <details class="panel activity-panel">
+        <summary>
+          <span>📨 Recent Alert Activity</span>
+          <span class="summarymeta activity-summarymeta">$${html(latestActivitySummary)}</span>
+        </summary>
+        <div class="panelbody">
+          <div class="activity-list">$${visibleActivityHtml}</div>
+          $${olderActivity.length ? `<details class="more-results activity-more">
+            <summary>Show $${olderActivity.length} more alert result$${olderActivity.length===1?'':'s'}</summary>
+            <div class="activity-list">$${olderActivityHtml}</div>
+          </details>` : ''}
+          <p class="muted" style="margin-bottom:0">Shows the latest result for each unique ntfy alert, including testing outcomes, safety stops, ignored alerts, and live-trade results. Retried delivery updates the same alert entry.</p>
+        </div>
+      </details>
+
       <div class="card">
-        <div class="compactline"><h2 style="margin:0">Recent Trades</h2><span class="muted">Latest activity</span></div>
+        <div class="compactline"><h2 style="margin:0">Recent Trades</h2><span class="muted">$${html(recentTradesSummary)}</span></div>
         <div style="margin-top:10px">
-          <table class="mobile-cards trades-table" aria-label="Recent trade history"><thead><tr><th>Time</th><th>Token</th><th>Side</th><th>Status</th><th>Impact</th><th>Signature</th></tr></thead><tbody>$${tradesHtml}</tbody></table>
+          <table class="mobile-cards trades-table" aria-label="Latest recent trades"><thead><tr><th>Time</th><th>Token</th><th>Side</th><th>Status</th><th>Impact</th><th>Signature</th></tr></thead><tbody>$${visibleTradesHtml}</tbody></table>
+          $${olderTradeRows.length ? `<details class="more-results trades-more">
+            <summary>Show $${olderTradeRows.length} more trade$${olderTradeRows.length===1?'':'s'}</summary>
+            <table class="mobile-cards trades-table" aria-label="Earlier recent trades"><thead><tr><th>Time</th><th>Token</th><th>Side</th><th>Status</th><th>Impact</th><th>Signature</th></tr></thead><tbody>$${olderTradesHtml}</tbody></table>
+          </details>` : ''}
         </div>
       </div>
 
@@ -2287,6 +2692,14 @@ services:
         }
       }
       async function forwardToN8n(msg){
+        const activityStateAtReceipt={
+          mode:state.mode,
+          master:state.master,
+          minSolReserve:state.minSolReserve,
+          maxPriceImpactPct:state.maxPriceImpactPct,
+          maxTradeUSDC:state.maxTradeUSDC,
+          tokens:structuredClone(state.tokens),
+        };
         const handoff=crypto.randomBytes(32).toString('hex');
         pendingHandoffs.set(msg.id,{token:handoff,expires:Date.now()+5*60*1000});
         let tokenPrep={ok:true,skipped:true};
@@ -2306,9 +2719,31 @@ services:
         }
         const text=await r.text();
         if(!r.ok) throw new Error(`n8n HTTP $${r.status} $${text.slice(0,300)}`);
-        let result;try{result=JSON.parse(text)}catch{result={raw:text.slice(0,500)}}
-        lastForwardedAt=nowIso();lastForwardedId=msg.id;lastDecision=result?.decision||result?.trade?.status||result?.status||null;
-        addAudit('NTFY_DECISION',{id:msg.id,topic:msg.topic,title:msg.title||'',decision:lastDecision});
+        let result=null,responseProblem=null;
+        try{result=JSON.parse(text)}catch{responseProblem='n8n returned a non-JSON response'}
+        const resolvedResponse=resolveN8nTerminalResponse(
+          result,trades.find(row=>row.alertId===msg.id)||null,responseProblem,
+        );
+        result=resolvedResponse.result;
+        const terminalDecision=resolvedResponse.terminalDecision;
+        if(resolvedResponse.recoveredFromTrade&&
+            ['SUBMITTING','PENDING'].includes(resolvedResponse.result.trade?.status)){
+          state.safetyLock=true;
+          state.safetyReason=`An unresolved durable trade was recovered after an invalid n8n response for alert $${msg.id}. Do not retry automatically.`;
+          state.master=false;
+          saveState();
+          resolvedResponse.result.trade.status='UNCERTAIN';
+          resolvedResponse.result.trade.updatedAt=nowIso();
+          saveTrades();
+          addAudit('TRADE_UNCERTAIN_INVALID_N8N_RESPONSE',{alertId:msg.id});
+        }
+        if(resolvedResponse.responseProblem){
+          console.warn('[ntfy]',resolvedResponse.responseProblem,'for',msg.id,
+            resolvedResponse.recoveredFromTrade?
+              '; using the durable idempotent trade result':'; stopping the alert without automatic replay');
+        }
+        lastForwardedAt=nowIso();lastForwardedId=msg.id;lastDecision=terminalDecision;
+        addAudit('NTFY_DECISION',activityDecisionRecord(msg,result,lastDecision,activityStateAtReceipt));
         claimedHandoffs.delete(msg.id);pendingHandoffs.delete(msg.id);
         console.log('[ntfy] decision',msg.id,'=>',lastDecision||'OK');
       }
@@ -2329,14 +2764,17 @@ services:
                 const line=buffer.slice(0,idx).trim();buffer=buffer.slice(idx+1);if(!line)continue;
                 let msg;try{msg=JSON.parse(line)}catch{continue}
                 if(msg.event!=='message'||typeof msg.id!=='string'||!msg.id||msg.id.length>128||seen.has(msg.id))continue;
-                addAudit('NTFY_RECEIVED',{id:msg.id,topic:msg.topic,title:msg.title||''});
+                addAudit('NTFY_RECEIVED',{id:msg.id,topic:activityText(msg.topic,160),title:activityText(msg.title,200)});
                 try{
                   await forwardToN8n(msg);
                   // Mark only after n8n returns a terminal decision. If delivery fails, reconnect + replay safely.
                   remember(msg.id);
                 }catch(e){
                   lastError=`n8n handoff: $${e.message||e}`;
-                  addAudit('NTFY_PROCESSING_ERROR',{id:msg.id,error:lastError});
+                  addAudit('NTFY_PROCESSING_ERROR',{
+                    id:msg.id,error:activityText(lastError,500),
+                    publicReason:defaultActivityReason('PROCESSING_ERROR'),
+                  });
                   console.error('[ntfy]',lastError);
                   throw e;
                 }

@@ -5,11 +5,11 @@
 
 ---
 
-# 🤖 Jupiter USDC Auto Trader v10.2.5
+# 🤖 Jupiter USDC Auto Trader v10.2.6
 
 **Self-hosted guarded Solana execution for Jupiter USDC Price Alerts.**
 
-**Current release:** `v10.2.5` · [See what changed](CHANGELOG.md#1025---2026-08-15)
+**Current release:** `v10.2.6` · [See what changed](CHANGELOG.md#1026---2026-08-15)
 
 > [!IMPORTANT]
 > This is the **optional execution companion** to [Jupiter USDC Price Alerts](https://github.com/Nicxx2/jupiter-usdc-price-alerts), which is the required passive monitoring and signal source. The auto trader does not monitor prices or create targets by itself. Install and run Jupiter USDC Price Alerts first; if you want alerts without automatic execution, use that project on its own.
@@ -66,6 +66,7 @@ Jupiter USDC Auto Trader
 - 🧹 **Bounded container logs** — Docker's rotating `local` log driver prevents unbounded stdout/stderr growth.
 - 🧪 **Behavior regression tests** — GitHub checks critical controller logic in addition to the release and Docker Compose safety matrices.
 - 📱 **Responsive dashboard** — labelled mobile cards, touch-sized controls, safe-area spacing, and readable long identifiers without changing the desktop workflow.
+- 📨 **Explainable alert activity** — a compact latest-result summary plus expandable outcomes and safe troubleshooting guidance for every received ntfy alert.
 
 ---
 
@@ -76,7 +77,7 @@ Jupiter USDC Auto Trader
 
 ![Jupiter Auto Trader dashboard safely started in TESTING with MASTER OFF](docs/images/dashboard-overview.jpg)
 
-The small version badge beside the dashboard title shows the release currently running, so you can confirm an update loaded the expected version. On narrower screens, information-rich tables become labelled cards while retaining every mint, target, topic, wallet, AUTO control, trade status, and signature; wallet status and missing-target notes stay grouped with the control they explain. The dashboard always starts in **`TESTING` with `MASTER OFF`**. Green readiness badges mean the latest checks passed; they do not enable real trading by themselves and are recomputed before entering `TRADING`.
+The small version badge beside the dashboard title shows the release currently running, so you can confirm an update loaded the expected version. On narrower screens, information-rich tables become labelled cards while retaining every mint, target, topic, wallet, AUTO control, trade status, and signature; wallet status and missing-target notes stay grouped with the control they explain. Recent Alert Activity and Recent Trades stay compact instead of growing the page indefinitely. The dashboard always starts in **`TESTING` with `MASTER OFF`**. Green readiness badges mean the latest checks passed; they do not enable real trading by themselves and are recomputed before entering `TRADING`.
 
 | Mode | MASTER | What happens |
 | --- | --- | --- |
@@ -126,6 +127,19 @@ Typing `ENABLE TRADING` makes the controller recompute full Trading readiness an
 - **AUTO BUY** and **AUTO SELL** are independent. Enable only the intended direction during commissioning.
 - `WOULD_TRADE` is the required TESTING result to inspect. It is not a submitted transaction and has no signature.
 - Configured targets are validation references, not a mirror of whether the source currently displays an alert as armed.
+
+</details>
+
+<details>
+<summary><strong>📨 Recent Alert Activity and Recent Trades — click to expand</strong></summary>
+
+**Recent Alert Activity** answers “the alert arrived — what happened?” Its collapsed heading always shows the newest alert's time, token/direction, outcome, and reason. Open it to see the newest three unique alerts; **Show more** reveals up to seven additional results. Open any individual alert for the available validated details and a **What to check** explanation. When available, those details include the receipt-time controls, exact wallet, recovery status, bounded balance snapshot, reserve, risk caps, quote result, and validated signature.
+
+It includes testing `WOULD_TRADE` results, expected ignored alerts such as RSI or Action Readiness notifications, controls that blocked execution, validation/safety aborts, temporary internal handoff errors, suppressions, and live-trade outcomes. If a pre-decision network/HTTP handoff is retried safely, the same bounded ntfy event ID is updated as one entry without erasing richer terminal details. A durable trade record is authoritative over any contradictory workflow response, and a claimed live-trade outcome without one is rejected. A malformed successful response is not trusted: an existing durable trade supplies its idempotent result, otherwise the alert is stopped as `ABORTED` and is not replayed. A receive-only entry without a terminal decision becomes an interrupted-handoff warning after ten minutes, which helps expose a restart or unavailable internal path without replaying anything from the dashboard. An old ignored or blocked alert is never replayed merely because settings are later changed.
+
+**Recent Trades** is narrower: it shows real execution attempts that reached the controller's durable trade path. The newest three are visible and records four through ten are behind **Show more**. The dashboard limit keeps desktop and mobile pages usable; the controller still retains up to 500 durable trade records for restart protection and audit evidence, while authenticated machine diagnostics expose the latest 20.
+
+Raw notification payloads and private topic names are not displayed in Recent Alert Activity. A transaction signature becomes a Solana Explorer link only after it passes the controller's Base58 shape validation. An `UNCERTAIN` outcome also remains prominent in the separate safety-lock banner; investigate on-chain and never retry it blindly.
 
 </details>
 
@@ -542,7 +556,7 @@ These money-moving infrastructure versions are pinned by readable release tag **
 - 💾 [Storage, backup, and restore](docs/storage.md)
 - 🏗️ [Architecture and automatic bootstrap](docs/architecture.md)
 - 🧪 [Commissioning a tiny live trade](docs/commissioning.md)
-- 🔎 [v10.2.5 implementation audit](docs/implementation-audit.md)
+- 🔎 [v10.2.6 implementation audit](docs/implementation-audit.md)
 - 🧪 [Regression test design and change rules](tests/README.md)
 - 🛠️ [Troubleshooting](docs/troubleshooting.md)
 - 🔐 [Security policy](SECURITY.md)
@@ -554,8 +568,9 @@ These money-moving infrastructure versions are pinned by readable release tag **
 
 The repository includes automated checks for:
 
-- controller and n8n behavior regressions using the actual Compose-embedded functions;
+- 51 controller, dashboard, RPC, and n8n behavior regressions using the actual Compose-embedded functions;
 - alert authorization, BUY/SELL quote math, final safety decisions, replay guards, balances, and RPC mainnet preflight;
+- bounded alert-result normalization, recognized terminal responses, invalid-response recovery, retry deduplication, stale-processing presentation, privacy, and compact 3/10 alert/trade history boundaries;
 - Docker Compose parsing;
 - required-secret rejection;
 - default source port 8000;

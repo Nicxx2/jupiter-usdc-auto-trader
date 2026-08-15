@@ -105,6 +105,25 @@ If the controller repeatedly restarts, inspect its log for a rejected port or UR
 
 Action Readiness/Rules and source armed/inactive display state are not troubleshooting gates for this trader.
 
+## An alert arrived but no trade appears
+
+Open the collapsed **Recent Alert Activity** panel first. Its heading summarizes the newest alert known to the controller; expanding it shows the newest three unique results, with up to ten available through **Show more**. Expand the matching item to see its bounded validated details and **What to check** guidance.
+
+- If there is no matching activity entry and the event should still be among the newest ten unique alerts, check authenticated machine diagnostics for its receipt in the latest 30 audit rows. If no matching `NTFY_RECEIVED` row is present there, check listener status, server/topic agreement, source connectivity, and freshness as described above.
+- `PROCESSING` means validation has not reached a terminal decision. Refresh shortly and do not send a duplicate alert. `PROCESSING_ERROR` means a pre-terminal handoff failed, or a receive-only entry has remained unresolved for more than ten minutes; run **Quick Test Everything** and inspect the controller/n8n logs.
+- `IGNORED` means the alert did not pass initial authorization, for example because it was not a fresh normal BUY/SELL price alert or a required control was off.
+- `WOULD_TRADE` is the expected TESTING result. It deliberately creates no blockchain transaction, signature, or **Recent Trades** record.
+- `ABORTED` means a fresh validation or safety check stopped submission. Fix the displayed cause, then wait for a new source alert; changing settings does not replay the old event.
+- `BURST_SUPPRESSED` and `TRIGGER_GUARD_SUPPRESSED` are deliberate duplicate/replay protections rather than missing executions.
+- `TRADE_CONFIRMED`, `TRADE_FAILED`, or `TRADE_UNCERTAIN` means the alert reached the durable execution path and should also have a **Recent Trades** record. Follow the separate uncertain-trade procedure below for `TRADE_UNCERTAIN`.
+- `PROCESSED` or `TRADE_RESULT` is a compatibility fallback for an older or unclassified terminal record. Inspect the corresponding durable trade/audit details rather than assuming success.
+
+A live-trade outcome is accepted only when the controller has the matching durable trade record. If an internal response claims a trade result without that record, the alert is shown as `ABORTED` rather than displaying an unsupported success or failure.
+
+The dashboard shows at most ten recent alert results and ten recent trade records to stay compact on desktop and mobile. This display limit does not delete the controller's bounded durable history: it retains up to 1,000 audit rows and 500 trade records in `controller_data`; authenticated machine diagnostics expose the latest 30 audit rows and 20 trade records.
+
+A pre-terminal network or non-success HTTP handoff can be retried safely by the listener using the same bounded ntfy event ID; the dashboard merges that progress into one activity item. This is not a transaction retry button. Terminal ignored, blocked, testing, and trade results are marked seen and are not reconsidered merely because controls later change. Never manually resend an alert whose submission outcome could be uncertain.
+
 ## RPC change appears not to apply
 
 RPC changes require `TESTING`, `MASTER OFF`, and no active trade. The configurator preflights the endpoint, updates persistent Gateway configuration, signals the supervisor with a unique request, and the controller waits for both its acknowledgement and the exact live endpoint fingerprint. A second concurrent change is rejected.
