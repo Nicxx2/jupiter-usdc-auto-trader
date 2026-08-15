@@ -20,7 +20,7 @@ If private vulnerability reporting is not enabled, contact the repository owner 
 
 ## Supported version
 
-Security fixes are targeted at the current `v10.2.6` one-Compose baseline unless a newer supported release is published. Infrastructure images are pinned by tag and immutable digest; version or digest upgrades need separate compatibility and commissioning tests.
+Security fixes are targeted at the current `v10.2.7` one-Compose baseline unless a newer supported release is published. Infrastructure images are pinned by tag and immutable digest; version or digest upgrades need separate compatibility and commissioning tests.
 
 ## Deployment security
 
@@ -30,6 +30,7 @@ Security fixes are targeted at the current `v10.2.6` one-Compose baseline unless
 - Set `DASHBOARD_COOKIE_SECURE=true` when dashboard access is exclusively through HTTPS; do not set it for direct HTTP access.
 - Change the generated first-run admin password immediately.
 - Keep Docker named volumes, backups, and `.env`/Portainer environment values access-restricted. In particular, `controller_data` and `gateway_conf` contain sensitive controller and wallet material.
+- Run the latest patch of a currently supported Portainer LTS release. For v10.2.7, use at least Portainer 2.39.4 on the supported 2.39 LTS line; older Portainer branches are not an acceptable security baseline for a Docker-socket administrator.
 - Keep the four installation secrets stable and backed up. Do not rotate them as a routine troubleshooting step.
 - Use a dedicated low-balance bot wallet and maintain a separate recovery backup.
 - Treat ntfy messages as untrusted triggers. Do not remove mint/topic/target/source validation.

@@ -6,7 +6,7 @@ Use a **Docker Standalone** Portainer environment. Do not deploy this Compose wi
 
 [Jupiter USDC Price Alerts](https://github.com/Nicxx2/jupiter-usdc-price-alerts) is the required passive monitoring and signal source; this auto trader is its optional execution companion and does not monitor prices by itself. Install the source first and use a multi-token release exposing `GET /api/tokens`; this release was contract-checked against Jupiter Alerts v3.4.
 
-The trader's Linux host needs an available TCP port 5680, enough Docker storage, and outbound DNS/HTTPS access. All pinned images provide Linux AMD64 and ARM64 variants.
+The trader's Linux host needs an available TCP port 5680, enough Docker storage, and outbound DNS/HTTPS access. The deployment requires [Docker Compose v2.23.1 or newer](https://docs.docker.com/reference/compose-file/configs/) because the controller is safely delivered through inline `configs.content`. Run the latest patch of a [currently supported Portainer LTS release](https://docs.portainer.io/start/lifecycle); for v10.2.7, use at least [Portainer 2.39.4 on the supported 2.39 LTS line](https://github.com/portainer/portainer/security/advisories/GHSA-x626-fcwx-f5pc), not the end-of-life 2.33 line. All pinned images provide Linux AMD64 and ARM64 variants.
 
 The Compose uses project-scoped service names, networks, and named volumes. The dashboard publishes host port 5680, so the copy/paste configuration supports one stack per host unless an advanced operator deliberately changes the published port. Different stack names have isolated volume namespaces.
 
@@ -42,6 +42,8 @@ These are installation identity/recovery material, not disposable deployment val
 7. Copy the complete `docker-compose.yml` from this repository and paste it into the editor without simplifying it.
 
 Do not add separate n8n or Gateway stacks. They are included and managed internally.
+
+Keep the `x-controller-source`, controller `configs` mount, and top-level `configs` block exactly as published. They keep the large embedded controller out of the Linux process argument list while preserving the single-file deployment. Portainer creates the temporary read-only config mount automatically; you do not create a host file or a Swarm config.
 
 The stack name becomes the persistent volume prefix. Keep it unchanged during every future update. A differently named stack selects a different, empty set of volumes and appears to be a fresh installation.
 
@@ -148,6 +150,8 @@ If the Gateway log mentions a missing `./certs/server_key.pem`, the stack is usi
 Gateway may label the corrected connection as development or unsafe HTTP in its own log. That wording describes the unencrypted internal transport, not the trader's Testing/Trading mode; it is expected while port 15888 remains unpublished.
 
 If the stack fails immediately, first check Portainer's deployment error for a missing required environment variable.
+
+If Portainer rejects `configs.content` as an unsupported field, update to the latest patch of a currently supported Portainer LTS release (at least 2.39.4 on the supported 2.39 LTS line for v10.2.7), then redeploy the same stack. Do not remove the config block or convert the controller back to `node -e`.
 
 ## 6. Sign in
 

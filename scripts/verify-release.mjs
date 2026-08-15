@@ -79,7 +79,7 @@ if (existsSync('package.json')) {
   try {
     const packageJson = JSON.parse(readFileSync('package.json', 'utf8'));
     check(packageJson.private === true, 'test package must remain private and non-publishable');
-    check(packageJson.version === '10.2.6', 'test package version is not v10.2.6');
+    check(packageJson.version === '10.2.7', 'test package version is not v10.2.7');
     check(
       packageJson.scripts?.test === 'node --test --test-concurrency=1',
       'dependency-free regression test command changed',
@@ -139,12 +139,19 @@ for (const markdownPath of markdownFiles) {
 
 if (existsSync('README.md')) {
   const readme = readFileSync('README.md', 'utf8');
-  check(readme.includes('# 🤖 Jupiter USDC Auto Trader v10.2.6'), 'README release heading is not v10.2.6');
-  check(readme.includes('**Current release:** `v10.2.6`'), 'README current-release marker is not v10.2.6');
+  check(readme.includes('# 🤖 Jupiter USDC Auto Trader v10.2.7'), 'README release heading is not v10.2.7');
+  check(readme.includes('**Current release:** `v10.2.7`'), 'README current-release marker is not v10.2.7');
   check(
     readme.includes('[Regression test design and change rules](tests/README.md)') &&
       readme.includes('npm test'),
     'README does not expose the behavior regression suite',
+  );
+  check(
+    readme.includes('Docker Compose v2.23.1 or newer') &&
+      readme.includes('currently supported Docker Standalone LTS release') &&
+      readme.includes('Portainer 2.39.4 on the supported 2.39 LTS line') &&
+      !readme.includes('Portainer 2.33.7'),
+    'README does not document the inline-config deployment requirement',
   );
   check(
     readme.includes('https://github.com/Nicxx2/jupiter-usdc-price-alerts') &&
@@ -208,7 +215,7 @@ if (existsSync('README.md')) {
 
 if (existsSync('CHANGELOG.md')) {
   const changelog = readFileSync('CHANGELOG.md', 'utf8');
-  const currentReleaseStart = changelog.indexOf('## [10.2.6] - 2026-08-15');
+  const currentReleaseStart = changelog.indexOf('## [10.2.7] - 2026-08-15');
   check(currentReleaseStart >= 0, 'CHANGELOG current release entry is missing');
   const nextReleaseStart = currentReleaseStart >= 0
     ? changelog.indexOf('\n## [', currentReleaseStart + 1)
@@ -218,13 +225,27 @@ if (existsSync('CHANGELOG.md')) {
     : '';
   check(currentRelease.includes('JATCommunity1022'), 'CHANGELOG workflow release identity is missing');
   check(
-    currentRelease.includes('Recent Alert Activity') &&
-      currentRelease.includes('latest three unique ntfy alert results') &&
-      currentRelease.includes('same activity item') &&
-      currentRelease.includes('durable 500-record trade limit') &&
-      currentRelease.includes('51 tests') &&
-      currentRelease.includes('without reprocessing an old alert'),
-    'CHANGELOG current release does not include the v10.2.6 alert-activity summary',
+    currentRelease.includes('/run/jat/trading-controller.js') &&
+      currentRelease.includes('argument list too long') &&
+      currentRelease.includes('Docker Compose v2.23.1') &&
+      currentRelease.includes('do not delete its volumes'),
+    'CHANGELOG current release does not include the v10.2.7 controller-delivery summary',
+  );
+  const activityReleaseStart = changelog.indexOf('## [10.2.6] - 2026-08-15');
+  const activityReleaseEnd = activityReleaseStart >= 0
+    ? changelog.indexOf('\n## [', activityReleaseStart + 1)
+    : -1;
+  const activityRelease = activityReleaseStart >= 0
+    ? changelog.slice(activityReleaseStart, activityReleaseEnd >= 0 ? activityReleaseEnd : undefined)
+    : '';
+  check(
+    activityRelease.includes('Recent Alert Activity') &&
+      activityRelease.includes('latest three unique ntfy alert results') &&
+      activityRelease.includes('same activity item') &&
+      activityRelease.includes('durable 500-record trade limit') &&
+      activityRelease.includes('51 tests') &&
+      activityRelease.includes('without reprocessing an old alert'),
+    'CHANGELOG v10.2.6 alert-activity history is incomplete',
   );
 }
 
@@ -234,6 +255,11 @@ if (existsSync('docs/architecture.md')) {
     architecture.includes('mounted `n8n_data` and `bootstrap_data` named-volume paths') &&
       !architecture.includes('n8n/bootstrap bind directories'),
     'architecture guide has stale bind-mount terminology for n8n named volumes',
+  );
+  check(
+    architecture.includes('mounted read-only at `/run/jat/trading-controller.js`') &&
+      architecture.includes("avoids Linux's per-argument size limit"),
+    'architecture guide does not explain safe controller source delivery',
   );
 }
 
@@ -254,6 +280,22 @@ if (existsSync('docs/troubleshooting.md')) {
       troubleshooting.includes('This is not a transaction retry button'),
     'troubleshooting guide does not explain recent alert outcomes and replay boundaries',
   );
+  check(
+    troubleshooting.includes('## Controller repeats `argument list too long`') &&
+      troubleshooting.includes('Update the existing stack to v10.2.7 or newer') &&
+      troubleshooting.includes('Do not delete or recreate the named volumes') &&
+      troubleshooting.includes('at least 2.39.4 on the supported 2.39 LTS line'),
+    'troubleshooting guide does not cover the v10.2.6 controller startup failure safely',
+  );
+}
+
+if (existsSync('SECURITY.md')) {
+  const security = readFileSync('SECURITY.md', 'utf8');
+  check(
+    security.includes('latest patch of a currently supported Portainer LTS release') &&
+      security.includes('at least Portainer 2.39.4 on the supported 2.39 LTS line'),
+    'security policy does not require a supported patched Portainer baseline',
+  );
 }
 
 if (existsSync('docs/storage.md')) {
@@ -263,6 +305,22 @@ if (existsSync('docs/storage.md')) {
       storage.includes('up to 1,000 audit rows and 500 durable trade records') &&
       storage.includes('not an unlimited accounting archive'),
     'storage guide does not document bounded controller history retention',
+  );
+  check(
+    storage.includes('The read-only `trading_controller_source` Compose config is deployment content, not an eighth persistent volume.'),
+    'storage guide does not distinguish controller deployment content from durable volumes',
+  );
+}
+
+if (existsSync('docs/portainer.md')) {
+  const portainer = readFileSync('docs/portainer.md', 'utf8');
+  check(
+    portainer.includes('Docker Compose v2.23.1 or newer') &&
+      portainer.includes('Portainer 2.39.4 on the supported 2.39 LTS line') &&
+      !portainer.includes('Portainer 2.33.7') &&
+      portainer.includes('Keep the `x-controller-source`') &&
+      portainer.includes('If Portainer rejects `configs.content`'),
+    'Portainer guide does not preserve or troubleshoot inline controller delivery',
   );
 }
 
@@ -343,7 +401,7 @@ compileEmbeddedService(
   'trading-controller',
   'trading-controller',
   "      const http = require('http');",
-  '\n    ports:',
+  '\n    entrypoint:',
 );
 compileEmbeddedService(
   'rpc-configurator',
@@ -402,6 +460,11 @@ check(compose.includes('APP_API_URL: ${APP_API_URL:-}'), 'APP_API_URL override i
 check(compose.includes('DASHBOARD_COOKIE_SECURE: ${DASHBOARD_COOKIE_SECURE:-false}'), 'secure-cookie reverse-proxy option is missing');
 check(compose.includes("DASHBOARD_COOKIE_SECURE?'; Secure':''"), 'session cookie does not honor secure-cookie option');
 check(compose.includes("parseEnvBoolean('DASHBOARD_COOKIE_SECURE'"), 'secure-cookie option does not use strict boolean validation');
+check(compose.includes('x-controller-source: &trading-controller-source |'), 'controller source YAML anchor is missing');
+check(compose.includes('content: *trading-controller-source'), 'top-level inline controller config is missing');
+check(compose.includes('source: trading_controller_source\n      target: /run/jat/trading-controller.js\n      mode: 0444'), 'controller read-only config mount changed');
+check(compose.includes('entrypoint:\n    - node\n    command:\n    - /run/jat/trading-controller.js'), 'controller is not started from the short mounted-file command');
+check(!compose.includes('- -e\n    command:\n    - |\n      const http = require(\'http\');'), 'controller source regressed to a single node -e argument');
 check(compose.includes("u.pathname==='/internal/source-state'"), 'controller source-state proxy is missing');
 check(compose.includes('const topic=currentEffectiveTopic(data,t.mint).trim();'), 'ntfy subscription does not use the canonical effective-topic helper');
 check(compose.includes('configuration volume is non-empty but root.yml is missing'), 'Gateway partial-volume overwrite guard is missing');
@@ -511,7 +574,7 @@ for (const marker of [
   'Global trade lock held by',
   'START_SERVER=true node dist/index.js --dev',
   'jupiter-ntfy-event',
-  "const APP_VERSION = '10.2.6'",
+  "const APP_VERSION = '10.2.7'",
   'state.version = APP_VERSION',
   '<span class="version">v$${APP_VERSION}</span>',
   'version:APP_VERSION, state:safePublicState()',

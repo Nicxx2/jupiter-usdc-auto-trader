@@ -2,6 +2,18 @@
 
 Notable release changes are recorded here. Versions follow semantic versioning: safety fixes and compatible deployment improvements increment the patch version; incompatible configuration or behavior changes require a larger increment and explicit migration guidance.
 
+## [10.2.7] - 2026-08-15
+
+### Controller startup compatibility hotfix
+
+- Delivers the embedded controller JavaScript as a read-only inline Compose config mounted at `/run/jat/trading-controller.js` instead of passing the complete source through `node -e` as one process argument.
+- Fixes repeated `exec /sbin/docker-init: argument list too long` restarts introduced when the v10.2.6 controller source exceeded Linux's per-argument size limit; dashboard port 5680 now becomes available normally.
+- Keeps the one-file copy/paste deployment, pinned Node image, `init: true`, controller code, environment contract, networks, published ports, and all seven persistent named volumes unchanged.
+- Adds release and rendered-Compose checks that require the read-only source mount, the short file-based Node command, valid embedded JavaScript, and a bounded startup argument.
+- Requires Docker Compose v2.23.1 or newer for inline `configs.content`; Portainer users should run the latest patch of a currently supported Docker Standalone LTS release (at least 2.39.4 on the supported 2.39 LTS line when v10.2.7 was published).
+
+This is a delivery-only startup fix. It does not change transaction authorization, alert handling, wallets, saved settings, trade/audit history, n8n workflow identity `JATCommunity1022`, or persistent data. Update the existing stack in place with the same stack/project name and four secrets; do not delete its volumes.
+
 ## [10.2.6] - 2026-08-15
 
 ### Alert outcome visibility and compact history

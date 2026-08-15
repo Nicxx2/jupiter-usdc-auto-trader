@@ -16,6 +16,8 @@ The Compose declares seven **named volumes**. Docker creates them on first deplo
 
 Every mount explicitly uses `volume.nocopy: true`. A new volume therefore begins genuinely empty and is initialized only by this stack; image files are not silently copied into it. Containers have no fixed host-global names, and Compose scopes physical volume names to the project.
 
+The read-only `trading_controller_source` Compose config is deployment content, not an eighth persistent volume. Compose recreates that mounted file from the pasted YAML, and it contains no user settings, wallet material, history, or backup state. It does not need to be included in volume backups.
+
 For the recommended Portainer stack name, physical names normally look like:
 
 ```text

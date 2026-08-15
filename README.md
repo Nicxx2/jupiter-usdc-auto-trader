@@ -5,11 +5,11 @@
 
 ---
 
-# 🤖 Jupiter USDC Auto Trader v10.2.6
+# 🤖 Jupiter USDC Auto Trader v10.2.7
 
 **Self-hosted guarded Solana execution for Jupiter USDC Price Alerts.**
 
-**Current release:** `v10.2.6` · [See what changed](CHANGELOG.md#1026---2026-08-15)
+**Current release:** `v10.2.7` · [See what changed](CHANGELOG.md#1027---2026-08-15)
 
 > [!IMPORTANT]
 > This is the **optional execution companion** to [Jupiter USDC Price Alerts](https://github.com/Nicxx2/jupiter-usdc-price-alerts), which is the required passive monitoring and signal source. The auto trader does not monitor prices or create targets by itself. Install and run Jupiter USDC Price Alerts first; if you want alerts without automatic execution, use that project on its own.
@@ -253,7 +253,7 @@ If either status is unhealthy, keep `MASTER OFF`, run **Quick Test Everything**,
 
 Choose the deployment method you use. Portainer is shown first because it requires only copy, paste, environment variables, and deploy.
 
-Before deploying, install and run [Jupiter USDC Price Alerts](https://github.com/Nicxx2/jupiter-usdc-price-alerts) as the required source. Use a multi-token release exposing `GET /api/tokens`; this release was contract-checked against Jupiter Alerts v3.4. The trader host needs Linux Docker Standalone with modern Docker Compose v2, an available TCP port 5680, enough Docker storage, and outbound DNS/HTTPS access. The pinned images publish Linux AMD64 and ARM64 variants.
+Before deploying, install and run [Jupiter USDC Price Alerts](https://github.com/Nicxx2/jupiter-usdc-price-alerts) as the required source. Use a multi-token release exposing `GET /api/tokens`; this release was contract-checked against Jupiter Alerts v3.4. The trader host needs Linux Docker Standalone with [Docker Compose v2.23.1 or newer](https://docs.docker.com/reference/compose-file/configs/), an available TCP port 5680, enough Docker storage, and outbound DNS/HTTPS access. For Portainer, use the latest patch of a [currently supported Docker Standalone LTS release](https://docs.portainer.io/start/lifecycle) with inline `configs.content` support; for the v10.2.7 release, use at least [Portainer 2.39.4 on the supported 2.39 LTS line](https://github.com/portainer/portainer/security/advisories/GHSA-x626-fcwx-f5pc), not the end-of-life 2.33 line. The pinned images publish Linux AMD64 and ARM64 variants.
 
 > [!IMPORTANT]
 > Docker creates the persistent volumes automatically. Keep the Portainer stack name (or Compose project name) unchanged for the lifetime of the installation: changing it selects a different, empty volume namespace and looks like a fresh install. Never delete the stack's volumes or run `docker compose down --volumes` / `down -v` unless permanent data destruction is intended.
@@ -556,7 +556,7 @@ These money-moving infrastructure versions are pinned by readable release tag **
 - 💾 [Storage, backup, and restore](docs/storage.md)
 - 🏗️ [Architecture and automatic bootstrap](docs/architecture.md)
 - 🧪 [Commissioning a tiny live trade](docs/commissioning.md)
-- 🔎 [v10.2.6 implementation audit](docs/implementation-audit.md)
+- 🔎 [v10.2.7 implementation audit](docs/implementation-audit.md)
 - 🧪 [Regression test design and change rules](tests/README.md)
 - 🛠️ [Troubleshooting](docs/troubleshooting.md)
 - 🔐 [Security policy](SECURITY.md)

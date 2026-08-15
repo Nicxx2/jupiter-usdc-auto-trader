@@ -195,11 +195,7 @@ services:
     restart: unless-stopped
     logging: *default-logging
     init: true
-    entrypoint:
-    - node
-    - -e
-    command:
-    - |
+    x-controller-source: &trading-controller-source |
       const http = require('http');
       const fs = require('fs');
       const crypto = require('crypto');
@@ -219,7 +215,7 @@ services:
       const RPC_TOKEN_FILE = `$${RPC_CONTROL_DIR}/rpc-config-token`;
       const RPC_RESTART_ACK_FILE = `$${RPC_CONTROL_DIR}/restart.ack`;
       const NTFY = resolveNtfyServer(process.env.NTFY_SERVER || 'https://ntfy.sh');
-      const APP_VERSION = '10.2.6';
+      const APP_VERSION = '10.2.7';
       const NETWORK = process.env.SOLANA_NETWORK || 'mainnet-beta';
       const TOPIC_REFRESH_MS = Number(process.env.TOPIC_REFRESH_SECONDS || 15) * 1000;
       const LOOKBACK = process.env.NTFY_LOOKBACK || '5m';
@@ -2796,6 +2792,14 @@ services:
       refreshTopicsLoop();
       streamLoop().catch(e=>{console.error('[ntfy] fatal',e);process.exit(1)});
       setInterval(cleanOldHandoffs,60_000).unref();
+    entrypoint:
+    - node
+    command:
+    - /run/jat/trading-controller.js
+    configs:
+    - source: trading_controller_source
+      target: /run/jat/trading-controller.js
+      mode: 0444
     ports:
     - 5680:5680
     environment:
@@ -3449,6 +3453,9 @@ networks:
     driver: bridge
   trading_control:
     driver: bridge
+configs:
+  trading_controller_source:
+    content: *trading-controller-source
 volumes:
   postgres_data:
   n8n_data:

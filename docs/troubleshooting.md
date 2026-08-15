@@ -15,6 +15,12 @@ Do not work around startup problems by publishing n8n/Gateway ports, manually im
 
 If deployment fails before services can initialize, confirm all four required variables are non-empty, TCP port 5680 is not already allocated, the target is Linux Docker Standalone with Compose v2 rather than Swarm, and the host has free Docker storage plus outbound DNS/HTTPS access. A port conflict must be resolved on the host; do not publish the internal n8n or Gateway ports as a workaround.
 
+## Controller repeats `argument list too long`
+
+Repeated `exec /sbin/docker-init: argument list too long` in `trading-controller` means the stack is using the v10.2.6 startup form that passed the complete controller through `node -e`. Update the existing stack to v10.2.7 or newer, keep the same stack/project name and four secret values, and redeploy. The corrected Compose mounts the controller as a read-only inline config and passes Node only a short file path.
+
+Do not delete or recreate the named volumes. They are unrelated to this startup error and contain the installation's wallets, settings, replay protection, audit history, and trades. If Portainer instead rejects `configs.content`, update to the latest patch of a currently supported Portainer Docker Standalone LTS release (at least 2.39.4 on the supported 2.39 LTS line for v10.2.7).
+
 A repeated `[persistence]` controller error/restart means a durable JSON write failed. Stop the stack, resolve a full/read-only Docker data store, and preserve the volumes; do not keep restarting or delete state to make the error disappear.
 
 ## Dashboard password

@@ -1,16 +1,17 @@
-# v10.2.6 implementation audit
+# v10.2.7 implementation audit
 
 Audit date: 2026-08-15
 
 The complete `docker-compose.yml` was inspected as the runtime source of truth, including the embedded Node controller, RPC configurator, Gateway and n8n supervisors, bootstrap shell, and decoded 52-node n8n workflow.
 
-This audit covers the first public release, its v10.2.3 edge-case hardening, the v10.2.4 responsive interface, the v10.2.5 mobile-card alignment polish, and the v10.2.6 compact alert outcome history. It verifies the execution controls, portable storage, Portainer lifecycle documentation, corrupt/partial-state fail-closed behavior, responsive safety presentation, bounded observability, and automated release checks.
+This audit covers the first public release, its v10.2.3 edge-case hardening, the v10.2.4 responsive interface, the v10.2.5 mobile-card alignment polish, the v10.2.6 compact alert outcome history, and the v10.2.7 controller-startup delivery fix. It verifies the execution controls, portable storage, Portainer lifecycle documentation, corrupt/partial-state fail-closed behavior, responsive safety presentation, bounded observability, and automated release checks.
 
 ## Confirmed runtime and safety behavior
 
 - Only host port 5680 is published. n8n 5678, Gateway 15888, and configurator 8081 remain private.
 - PostgreSQL 16, n8n/runner 2.31.6, Node 22 Alpine, Gateway 2.15.1, and Alpine 3.22 are pinned by readable tag and immutable multi-architecture digest.
 - Seven project-scoped Docker named volumes provide persistent storage; all 15 persistent mounts use `volume.nocopy: true`, and no fixed host-global container names are used.
+- The large controller source is delivered through a read-only inline Compose config at `/run/jat/trading-controller.js`; its Node entrypoint receives only the short file path, avoiding Linux's per-argument limit while retaining `init: true` and the single-file deployment.
 - Every service uses bounded Docker `local` logging (10 MB × 3 files); PostgreSQL has a 60-second graceful-stop window, and n8n/runner/Gateway have 30 seconds.
 - Gateway initialization accepts a genuinely empty volume or a complete existing configuration, but fails closed on partial/non-empty state instead of running defaults over potentially restored wallet/RPC data.
 - The n8n permissions initializer applies the UID 1000 ownership/write fix.
@@ -115,4 +116,4 @@ Each wallet selector, AUTO checkbox, mode control, and confirmation input exists
 
 The dependency-free suite contains 51 behavior tests, including responsive invariants for breakpoints, labelled cards, single-copy trading controls, touch sizing, safe-area handling, mobile input hints, auxiliary pages, bounded alert fields, malformed result rejection, recognized terminal decisions, durable-record requirements, invalid-response recovery, retry deduplication, terminal-result/detail precedence, stale-processing presentation, actionable guidance, privacy, and 3/10 history boundaries. These checks complement manual browser/device inspection; they do not claim that a static test can reproduce every browser's rendering engine.
 
-The n8n payload remains the audited 52-node `JATCommunity1022` workflow with its existing SHA-256 because v10.2.3 changes the controller, configurator preflight, and Compose lifecycle, v10.2.4 adds the responsive presentation, v10.2.5 aligns related mobile-card content, and v10.2.6 enriches bounded controller audit rows and dashboard observability without changing workflow execution behavior.
+The n8n payload remains the audited 52-node `JATCommunity1022` workflow with its existing SHA-256 because v10.2.3 changes the controller, configurator preflight, and Compose lifecycle, v10.2.4 adds the responsive presentation, v10.2.5 aligns related mobile-card content, v10.2.6 enriches bounded controller audit rows and dashboard observability, and v10.2.7 changes only controller source delivery at container startup without changing workflow execution behavior.

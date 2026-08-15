@@ -36,6 +36,54 @@ function validConfig(label, overrides, expectedPort, expectedUrl, expectedSecure
 
   const controller = model.services?.['trading-controller'];
   if (!controller) fail(`${label} trading-controller service is missing`);
+  const controllerEntrypoint = Array.isArray(controller.entrypoint)
+    ? controller.entrypoint.map(String)
+    : [String(controller.entrypoint || '')];
+  const controllerCommand = Array.isArray(controller.command)
+    ? controller.command.map(String)
+    : [String(controller.command || '')];
+  if (JSON.stringify(controllerEntrypoint) !== JSON.stringify(['node'])) {
+    fail(`${label} controller entrypoint must remain the short Node executable`);
+  }
+  if (JSON.stringify(controllerCommand) !== JSON.stringify(['/run/jat/trading-controller.js'])) {
+    fail(`${label} controller command must remain the mounted source path`);
+  }
+  if (controller.init !== true) fail(`${label} controller init wrapper is missing`);
+  const largestStartupArgument = Math.max(
+    ...controllerEntrypoint.concat(controllerCommand).map((value) => Buffer.byteLength(value)),
+  );
+  if (largestStartupArgument > 4096) {
+    fail(`${label} controller startup argument is unexpectedly large: ${largestStartupArgument} bytes`);
+  }
+  const controllerConfigMount = (controller.configs || []).find(
+    (config) => config.source === 'trading_controller_source',
+  );
+  if (!controllerConfigMount || controllerConfigMount.target !== '/run/jat/trading-controller.js' ||
+      String(controllerConfigMount.mode) !== '0444') {
+    fail(`${label} controller source is not mounted read-only at the required path`);
+  }
+  const controllerSource = model.configs?.trading_controller_source?.content;
+  if (typeof controllerSource !== 'string' || !controllerSource.includes("const http = require('http');") ||
+      !controllerSource.includes("const APP_VERSION = '10.2.7';") ||
+      !controllerSource.includes('setInterval(cleanOldHandoffs,60_000).unref();') ||
+      Buffer.byteLength(controllerSource) < 150_000) {
+    fail(`${label} rendered inline controller source is missing or stale`);
+  }
+  const configNames = Object.keys(model.configs || {});
+  if (JSON.stringify(configNames) !== JSON.stringify(['trading_controller_source'])) {
+    fail(`${label} unexpected top-level Compose configs: ${configNames.join(', ') || '(none)'}`);
+  }
+  const configConsumers = Object.entries(model.services || {})
+    .filter(([, service]) => (service.configs || []).some((config) => config.source === 'trading_controller_source'))
+    .map(([serviceName]) => serviceName);
+  if (JSON.stringify(configConsumers) !== JSON.stringify(['trading-controller'])) {
+    fail(`${label} controller source config has unexpected consumers: ${configConsumers.join(', ') || '(none)'}`);
+  }
+  try {
+    new Function(controllerSource);
+  } catch (error) {
+    fail(`${label} rendered inline controller source has a syntax error: ${error.message}`);
+  }
   for (const serviceName of ['trading-controller', 'rpc-configurator', 'gateway']) {
     const aliases = model.services?.[serviceName]?.extra_hosts || {};
     const hasHostGateway = Array.isArray(aliases)
@@ -257,4 +305,4 @@ for (const secret of Object.keys(stableTestSecrets)) {
   if (!output.includes(secret)) fail(`missing-secret error did not identify ${secret}`);
 }
 
-console.log('PASS: Compose configuration, storage, network, dependency, restart, shutdown, logging, secret, and port invariants verified');
+console.log('PASS: Compose controller delivery, storage, network, dependency, restart, shutdown, logging, secret, and port invariants verified');

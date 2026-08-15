@@ -28,7 +28,7 @@ The behavior suite currently protects:
 - canonical RPC endpoint fingerprints and diagnostic redaction; and
 - Solana mainnet-beta genesis and confirmed-blockhash preflight.
 
-The separate release verifier protects the complete artifact, embedded workflow/hash, safety markers, documentation, images, storage declarations, and published-port boundary. The Compose matrix renders configuration combinations and protects service topology, secrets, dependencies, networks, volumes, lifecycle, logging, and port behavior.
+The separate release verifier protects the complete artifact, controller source delivery, embedded workflow/hash, safety markers, documentation, images, storage declarations, and published-port boundary. The Compose matrix renders configuration combinations and protects the read-only controller source mount, bounded startup arguments, service topology, secrets, dependencies, networks, volumes, lifecycle, logging, and port behavior.
 
 ## Change rule
 
