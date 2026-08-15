@@ -17,7 +17,7 @@ No dependency installation, wallet, RPC key, running container, or network acces
 The behavior suite currently protects:
 
 - strict environment booleans and source/ntfy URL boundaries;
-- responsive dashboard breakpoints, labelled mobile cards, touch targets, safe-area handling, and single-copy trading controls;
+- responsive dashboard breakpoints, labelled mobile cards, grouped wallet/AUTO content, touch targets, safe-area handling, and single-copy trading controls;
 - Solana mint, wallet, and signature shapes;
 - controller, authentication, trade, audit, replay, and trigger-guard persisted schemas;
 - n8n alert authorization, BUY/SELL quote math, repeated quote validation, and final safety evaluation;

@@ -5,11 +5,11 @@
 
 ---
 
-# 🤖 Jupiter USDC Auto Trader v10.2.4
+# 🤖 Jupiter USDC Auto Trader v10.2.5
 
 **Self-hosted guarded Solana execution for Jupiter USDC Price Alerts.**
 
-**Current release:** `v10.2.4` · [See what changed](CHANGELOG.md#1024---2026-08-15)
+**Current release:** `v10.2.5` · [See what changed](CHANGELOG.md#1025---2026-08-15)
 
 > [!IMPORTANT]
 > This is the **optional execution companion** to [Jupiter USDC Price Alerts](https://github.com/Nicxx2/jupiter-usdc-price-alerts), which is the required passive monitoring and signal source. The auto trader does not monitor prices or create targets by itself. Install and run Jupiter USDC Price Alerts first; if you want alerts without automatic execution, use that project on its own.
@@ -76,7 +76,7 @@ Jupiter USDC Auto Trader
 
 ![Jupiter Auto Trader dashboard safely started in TESTING with MASTER OFF](docs/images/dashboard-overview.jpg)
 
-The small version badge beside the dashboard title shows the release currently running, so you can confirm an update loaded the expected version. On narrower screens, information-rich tables become labelled cards while retaining every mint, target, topic, wallet, AUTO control, trade status, and signature. The dashboard always starts in **`TESTING` with `MASTER OFF`**. Green readiness badges mean the latest checks passed; they do not enable real trading by themselves and are recomputed before entering `TRADING`.
+The small version badge beside the dashboard title shows the release currently running, so you can confirm an update loaded the expected version. On narrower screens, information-rich tables become labelled cards while retaining every mint, target, topic, wallet, AUTO control, trade status, and signature; wallet status and missing-target notes stay grouped with the control they explain. The dashboard always starts in **`TESTING` with `MASTER OFF`**. Green readiness badges mean the latest checks passed; they do not enable real trading by themselves and are recomputed before entering `TRADING`.
 
 | Mode | MASTER | What happens |
 | --- | --- | --- |
@@ -542,7 +542,7 @@ These money-moving infrastructure versions are pinned by readable release tag **
 - 💾 [Storage, backup, and restore](docs/storage.md)
 - 🏗️ [Architecture and automatic bootstrap](docs/architecture.md)
 - 🧪 [Commissioning a tiny live trade](docs/commissioning.md)
-- 🔎 [v10.2.4 implementation audit](docs/implementation-audit.md)
+- 🔎 [v10.2.5 implementation audit](docs/implementation-audit.md)
 - 🧪 [Regression test design and change rules](tests/README.md)
 - 🛠️ [Troubleshooting](docs/troubleshooting.md)
 - 🔐 [Security policy](SECURITY.md)

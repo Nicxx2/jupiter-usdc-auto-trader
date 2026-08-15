@@ -2,6 +2,17 @@
 
 Notable release changes are recorded here. Versions follow semantic versioning: safety fixes and compatible deployment improvements increment the patch version; incompatible configuration or behavior changes require a larger increment and explicit migration guidance.
 
+## [10.2.5] - 2026-08-15
+
+### Mobile automation card alignment
+
+- Grouped each trading-wallet selector with its assignment status so both remain in the value column of a labelled mobile card.
+- Grouped AUTO BUY and AUTO SELL into consistent rows, with a missing-target note directly beneath the corresponding disabled control instead of being placed by the parent card grid.
+- Kept control names, submitted values, disabled-target gates, desktop behavior, and the existing responsive breakpoints unchanged.
+- Extended the responsive regression test to lock the wallet and automation grouping structure and missing-target note styling.
+
+The embedded 52-node `JATCommunity1022` workflow, transaction routes, persistent state schemas, authentication, wallet data, and trading decisions are unchanged in this presentation-only patch.
+
 ## [10.2.4] - 2026-08-15
 
 ### Responsive dashboard and device usability

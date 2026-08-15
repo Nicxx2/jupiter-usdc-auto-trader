@@ -78,7 +78,7 @@ if (existsSync('package.json')) {
   try {
     const packageJson = JSON.parse(readFileSync('package.json', 'utf8'));
     check(packageJson.private === true, 'test package must remain private and non-publishable');
-    check(packageJson.version === '10.2.4', 'test package version is not v10.2.4');
+    check(packageJson.version === '10.2.5', 'test package version is not v10.2.5');
     check(
       packageJson.scripts?.test === 'node --test --test-concurrency=1',
       'dependency-free regression test command changed',
@@ -138,8 +138,8 @@ for (const markdownPath of markdownFiles) {
 
 if (existsSync('README.md')) {
   const readme = readFileSync('README.md', 'utf8');
-  check(readme.includes('# 🤖 Jupiter USDC Auto Trader v10.2.4'), 'README release heading is not v10.2.4');
-  check(readme.includes('**Current release:** `v10.2.4`'), 'README current-release marker is not v10.2.4');
+  check(readme.includes('# 🤖 Jupiter USDC Auto Trader v10.2.5'), 'README release heading is not v10.2.5');
+  check(readme.includes('**Current release:** `v10.2.5`'), 'README current-release marker is not v10.2.5');
   check(
     readme.includes('[Regression test design and change rules](tests/README.md)') &&
       readme.includes('npm test'),
@@ -200,7 +200,7 @@ if (existsSync('README.md')) {
 
 if (existsSync('CHANGELOG.md')) {
   const changelog = readFileSync('CHANGELOG.md', 'utf8');
-  const currentReleaseStart = changelog.indexOf('## [10.2.4] - 2026-08-15');
+  const currentReleaseStart = changelog.indexOf('## [10.2.5] - 2026-08-15');
   check(currentReleaseStart >= 0, 'CHANGELOG current release entry is missing');
   const nextReleaseStart = currentReleaseStart >= 0
     ? changelog.indexOf('\n## [', currentReleaseStart + 1)
@@ -210,11 +210,11 @@ if (existsSync('CHANGELOG.md')) {
     : '';
   check(currentRelease.includes('JATCommunity1022'), 'CHANGELOG workflow release identity is missing');
   check(
-    currentRelease.includes('labelled mobile cards') &&
-      currentRelease.includes('single authoritative form control') &&
-      currentRelease.includes('safe-area') &&
-      currentRelease.includes('dependency-free suite to 43 tests'),
-    'CHANGELOG current release does not include the v10.2.4 responsive summary',
+    currentRelease.includes('trading-wallet selector') &&
+      currentRelease.includes('AUTO BUY and AUTO SELL') &&
+      currentRelease.includes('missing-target note') &&
+      currentRelease.includes('presentation-only patch'),
+    'CHANGELOG current release does not include the v10.2.5 mobile alignment summary',
   );
 }
 
@@ -472,7 +472,7 @@ for (const marker of [
   'Global trade lock held by',
   'START_SERVER=true node dist/index.js --dev',
   'jupiter-ntfy-event',
-  "const APP_VERSION = '10.2.4'",
+  "const APP_VERSION = '10.2.5'",
   'state.version = APP_VERSION',
   '<span class="version">v$${APP_VERSION}</span>',
   'version:APP_VERSION, state:safePublicState()',

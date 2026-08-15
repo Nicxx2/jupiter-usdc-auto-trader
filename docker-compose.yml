@@ -219,7 +219,7 @@ services:
       const RPC_TOKEN_FILE = `$${RPC_CONTROL_DIR}/rpc-config-token`;
       const RPC_RESTART_ACK_FILE = `$${RPC_CONTROL_DIR}/restart.ack`;
       const NTFY = resolveNtfyServer(process.env.NTFY_SERVER || 'https://ntfy.sh');
-      const APP_VERSION = '10.2.4';
+      const APP_VERSION = '10.2.5';
       const NETWORK = process.env.SOLANA_NETWORK || 'mainnet-beta';
       const TOPIC_REFRESH_MS = Number(process.env.TOPIC_REFRESH_SECONDS || 15) * 1000;
       const LOOKBACK = process.env.NTFY_LOOKBACK || '5m';
@@ -1193,16 +1193,22 @@ services:
               <b>SELL:</b> $${sellConfigured ? html(sellTargets.map(formatPrice).join(', ')) : '<span class="muted">No target</span>'}</small>
             </td>
             <td data-label="ntfy topic"><small class="breakable">$${html(s.ntfy_effective_topic || t.ntfy_topic || '—')}</small></td>
-            <td data-label="Trading wallet"><select name="wallet_$${html(t.mint)}" aria-label="Trading wallet for $${html(t.name)}">$${walletOptions}</select><div class="muted" style="margin-top:5px">$${assignmentStatus}</div></td>
+            <td data-label="Trading wallet"><div class="cell-value wallet-control"><select name="wallet_$${html(t.mint)}" aria-label="Trading wallet for $${html(t.name)}">$${walletOptions}</select><div class="muted assignment-status">$${assignmentStatus}</div></div></td>
             <td data-label="Automation">
-              <label class="toggle-line" title="$${buyConfigured?'Triggered only by a fresh Jupiter BUY ntfy alert':'Configure a BUY target in Jupiter Alerts first'}">
-                <input type="checkbox" name="autoBuy_$${html(t.mint)}" $${c.autoBuy ? 'checked' : ''} $${t.enabled&&buyConfigured ? '' : 'disabled'}> AUTO BUY
-              </label>
-              $${buyConfigured?'':'<small class="muted"> · no BUY target</small>'}<br>
-              <label class="toggle-line" title="$${sellConfigured?'Triggered only by a fresh Jupiter SELL ntfy alert':'Configure a SELL target in Jupiter Alerts first'}">
-                <input type="checkbox" name="autoSell_$${html(t.mint)}" $${c.autoSell ? 'checked' : ''} $${t.enabled&&sellConfigured ? '' : 'disabled'}> AUTO SELL
-              </label>
-              $${sellConfigured?'':'<small class="muted"> · no SELL target</small>'}
+              <div class="cell-value automation-controls">
+                <div class="automation-option">
+                  <label class="toggle-line" title="$${buyConfigured?'Triggered only by a fresh Jupiter BUY ntfy alert':'Configure a BUY target in Jupiter Alerts first'}">
+                    <input type="checkbox" name="autoBuy_$${html(t.mint)}" $${c.autoBuy ? 'checked' : ''} $${t.enabled&&buyConfigured ? '' : 'disabled'}> AUTO BUY
+                  </label>
+                  $${buyConfigured?'':'<small class="muted automation-note">No BUY target configured</small>'}
+                </div>
+                <div class="automation-option">
+                  <label class="toggle-line" title="$${sellConfigured?'Triggered only by a fresh Jupiter SELL ntfy alert':'Configure a SELL target in Jupiter Alerts first'}">
+                    <input type="checkbox" name="autoSell_$${html(t.mint)}" $${c.autoSell ? 'checked' : ''} $${t.enabled&&sellConfigured ? '' : 'disabled'}> AUTO SELL
+                  </label>
+                  $${sellConfigured?'':'<small class="muted automation-note">No SELL target configured</small>'}
+                </div>
+              </div>
             </td>
           </tr>`;
         }).join('') || '<tr class="empty-row"><td colspan="7"><div class="empty">No coin configuration is currently available from Jupiter USDC Price Alerts.</div></td></tr>';
@@ -1302,7 +1308,7 @@ services:
       .panelbody{padding:16px 18px}.summarymeta{font-size:12px;font-weight:500;color:#94a3b5;margin-left:auto;text-align:right}
       .statusrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.chip{font-size:12px;padding:5px 8px;border-radius:999px;background:#222934;border:1px solid #333d4b;color:#c6d0db}.chip.ok{background:#10291a;border-color:#285e38}.chip.warnchip{background:#332814;border-color:#725b28}
       .hero{padding:16px 18px}.hero h2{margin:0 0 8px}.compactline{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.sectiontitle{margin:22px 2px 8px;color:#9aa7b7;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
-      .empty{padding:20px;text-align:center;color:#91a0b2}.breakable{overflow-wrap:anywhere;word-break:break-word}.toggle-line{display:inline-flex;align-items:center;gap:6px}
+      .empty{padding:20px;text-align:center;color:#91a0b2}.breakable{overflow-wrap:anywhere;word-break:break-word}.cell-value{min-width:0}.wallet-control select{max-width:100%}.assignment-status{margin-top:5px;overflow-wrap:anywhere}.automation-controls{display:grid;gap:6px}.automation-option{min-width:0}.automation-note{display:block;margin:2px 0 0 28px}.toggle-line{display:inline-flex;align-items:center;gap:6px}
       :focus-visible{outline:3px solid #79b8ff;outline-offset:3px}
       @media(max-width:1100px){
         table.mobile-cards,table.mobile-cards *{box-sizing:border-box}

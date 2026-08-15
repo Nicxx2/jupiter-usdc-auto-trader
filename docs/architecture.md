@@ -45,7 +45,7 @@ Three isolated bridge networks limit normal service reachability:
 6. The bootstrap writes a restart request. The n8n supervisor restarts the actual n8n child, acknowledges the requested workflow hash, and returns healthy.
 7. The runner and controller start only after bootstrap completion and required health checks.
 
-The workflow identity remains `JATCommunity1022` and its generated SHA-256 is `d9cdd129533546d7c0ab4178eb9cb8a4dd517f55da5be43be930b43c5a677848`. Bootstrap deterministically prepares the embedded audited v10.2.2 workflow template, first-release note, and controller source-proxy URLs, verifies that exact hash, and only then imports it. The v10.2.3 patch hardens the controller, RPC preflight, and Compose lifecycle; v10.2.4 adds responsive controller-rendered presentation without changing those 52 workflow nodes or their execution behavior. `scripts/verify-release.mjs` performs the same deterministic verification before release.
+The workflow identity remains `JATCommunity1022` and its generated SHA-256 is `d9cdd129533546d7c0ab4178eb9cb8a4dd517f55da5be43be930b43c5a677848`. Bootstrap deterministically prepares the embedded audited v10.2.2 workflow template, first-release note, and controller source-proxy URLs, verifies that exact hash, and only then imports it. The v10.2.3 patch hardens the controller, RPC preflight, and Compose lifecycle; v10.2.4 adds responsive controller-rendered presentation; and v10.2.5 aligns related content inside mobile cards without changing those 52 workflow nodes or their execution behavior. `scripts/verify-release.mjs` performs the same deterministic verification before release.
 
 ## Source API configuration
 

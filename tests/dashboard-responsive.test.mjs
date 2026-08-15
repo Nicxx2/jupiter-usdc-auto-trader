@@ -58,8 +58,25 @@ test('complex dashboard tables become labelled cards without hiding safety data'
   assert.ok(dashboard.includes('table.mobile-cards td:before{content:attr(data-label)'));
   assert.ok(dashboard.includes('table.mobile-cards,table.mobile-cards *{box-sizing:border-box}'));
   assert.ok(dashboard.includes('No coin configuration is currently available from Jupiter USDC Price Alerts.'));
+  assert.ok(dashboard.includes('class="cell-value wallet-control"'));
+  assert.ok(dashboard.includes('class="cell-value automation-controls"'));
+  assert.equal(occurrences(dashboard, 'class="automation-option"'), 2);
+  assert.ok(dashboard.includes('class="muted automation-note">No BUY target configured'));
+  assert.ok(dashboard.includes('class="muted automation-note">No SELL target configured'));
+  assert.ok(dashboard.includes('.automation-note{display:block;margin:2px 0 0 28px}'));
   assert.ok(dashboard.includes('.mint{font-family:ui-monospace,monospace;font-size:11px;word-break:break-all'));
   assert.ok(dashboard.includes('.breakable{overflow-wrap:anywhere;word-break:break-word}'));
+
+  const walletCell = dashboard.match(/<td data-label="Trading wallet">([\s\S]*?)<\/td>/)?.[1] || '';
+  assert.ok(walletCell.startsWith('<div class="cell-value wallet-control">'));
+  assert.ok(walletCell.includes('class="muted assignment-status"'));
+
+  const automationCell = dashboard.match(/<td data-label="Automation">([\s\S]*?)<\/td>/)?.[1] || '';
+  assert.ok(automationCell.includes('<div class="cell-value automation-controls">'));
+  assert.equal(occurrences(automationCell, 'class="automation-option"'), 2);
+  assert.ok(automationCell.includes("$${t.enabled&&buyConfigured ? '' : 'disabled'}"));
+  assert.ok(automationCell.includes("$${t.enabled&&sellConfigured ? '' : 'disabled'}"));
+  assert.doesNotMatch(automationCell, /<br\s*\/?\s*>/i);
 });
 
 test('responsive presentation keeps one authoritative copy of every trading control', () => {
